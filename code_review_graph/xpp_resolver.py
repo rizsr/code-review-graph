@@ -40,6 +40,9 @@ _XPP_ARTIFACT_FOLDERS = {
     "map_table": ["AxTable"],
     # field-level references resolve from the owning artifact
     "field": ["AxTable", "AxMap", "AxDataEntityView"],
+    # tableNum/fieldNum — QueryBuilder API intrinsics referencing tables/fields
+    "tablenum": ["AxTable"],
+    "fieldnum": ["AxTable", "AxMap", "AxDataEntityView"],
     # event subscriptions: publisher can be class or table
     "event": ["AxClass", "AxTable"],
     # security / workflow / other metadata artifacts

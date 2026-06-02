@@ -1494,6 +1494,91 @@ public void run()
         ]
         assert dml_edges, "Expected insert_recordset ACCESSES edge"
 
+    def test_select_from_explicit_fields_captures_table(self, tmp_path):
+        """select Field1, Field2 from Table captures the table as ACCESSES(table)."""
+        xml_path = self._make_class_xml(tmp_path, "TestFromTable", """
+public void run()
+{
+    select SalesId, CustAccount from SalesTable where SalesTable.SalesStatus == SalesStatus::Open;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        table_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.target == "SalesTable"
+            and e.extra.get("xpp_ref_kind") == "table"
+        ]
+        assert table_edges, "Expected ACCESSES(table) edge for SalesTable"
+
+    def test_select_from_explicit_fields_emits_select_fields(self, tmp_path):
+        """select Field1, Field2 from Table emits ACCESSES(select_field) for each field."""
+        xml_path = self._make_class_xml(tmp_path, "TestFromFields", """
+public void run()
+{
+    select SalesId, CustAccount from SalesTable;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        field_targets = {
+            e.target for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "select_field"
+        }
+        assert "SalesId" in field_targets
+        assert "CustAccount" in field_targets
+
+    def test_select_aggregate_from_captures_table(self, tmp_path):
+        """select sum(Field) from Table captures the table even when aggregate precedes FROM."""
+        xml_path = self._make_class_xml(tmp_path, "TestAggFrom", """
+public void run()
+{
+    select sum(LineAmount) from SalesLine where SalesLine.SalesId == salesId;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        table_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.target == "SalesLine"
+            and e.extra.get("xpp_ref_kind") == "table"
+        ]
+        assert table_edges, "Expected ACCESSES(table) edge for SalesLine"
+
+    def test_tablenum_emits_accesses_tablenum(self, tmp_path):
+        """tableNum(TableName) in QueryBuildDataSource emits ACCESSES(tablenum) edge."""
+        xml_path = self._make_class_xml(tmp_path, "TestTableNum", """
+public void buildQuery()
+{
+    Query query = new Query();
+    QueryBuildDataSource qbds = query.addDataSource(tableNum(SalesTable));
+    qbds.addRange(fieldNum(SalesTable, SalesId));
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        tablenum_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "tablenum"
+        ]
+        assert any(e.target == "SalesTable" for e in tablenum_edges), \
+            "Expected ACCESSES(tablenum) edge for SalesTable"
+
+    def test_fieldnum_emits_accesses_fieldnum(self, tmp_path):
+        """fieldNum(Table, Field) emits ACCESSES(fieldnum) with xpp_table annotation."""
+        xml_path = self._make_class_xml(tmp_path, "TestFieldNum", """
+public void buildQuery()
+{
+    QueryBuildDataSource qbds = query.addDataSource(tableNum(CustTable));
+    qbds.addRange(fieldNum(CustTable, AccountNum));
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        fieldnum_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "fieldnum"
+        ]
+        assert any(
+            e.target == "CustTable.AccountNum" and e.extra.get("xpp_table") == "CustTable"
+            for e in fieldnum_edges
+        ), "Expected ACCESSES(fieldnum) edge for CustTable.AccountNum"
+
 
 class TestXppEventSupport:
     """PreEventHandler/PostEventHandler distinction and attribute-based event handlers."""

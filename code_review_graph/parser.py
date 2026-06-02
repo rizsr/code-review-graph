@@ -200,6 +200,20 @@ _XPP_SELECT_RE = re.compile(
     r"(?=\s*(?:;|\(|where\b|join\b|order\b|group\b|exists\b|notexists\b|,|\n|$))",
     re.IGNORECASE,
 )
+# Supplemental regex for the "from" variant: select [fields] from TableName.
+# Handles cases like `select Field1, Field2 from SalesTable` and
+# `select sum(Amount) from SalesLine` where _XPP_SELECT_RE misses the table.
+_XPP_SELECT_FROM_RE = re.compile(
+    r"\b(?:while\s+select|select|insert_recordset|update_recordset|delete_from)\b"
+    r"(?P<prefix>[^;{}\n]*?)"
+    r"\bfrom\s+(?P<table>[A-Za-z_]\w*)"
+    r"(?=\s*(?:;|\(|where\b|join\b|order\b|group\b|exists\b|notexists\b|,|\n|$))",
+    re.IGNORECASE,
+)
+# Aggregate function bare names — excluded when harvesting select_field refs from prefix.
+_XPP_AGG_FN_NAMES: frozenset[str] = frozenset({
+    "sum", "count", "max", "min", "avg", "maxof", "minof", "sumof", "avgof", "countof",
+})
 _XPP_JOIN_RE = re.compile(
     r"\b(?:exists\s+join|notexists\s+join|outer\s+join|join)\s+([A-Za-z_]\w*)",
     re.IGNORECASE,
@@ -224,6 +238,15 @@ _XPP_SYSDAQUERY_RE = re.compile(
     r"|DescendingOrderByExpression|QueryObject|DataSourceExpression"
     r"|FieldListWithAllDataSources|ContainsExpression|AndExpression|OrExpression"
     r"|NotExpression|EqualsExpression|InExpression|NotInExpression|TableBufferRecord))\s*\(",
+    re.IGNORECASE,
+)
+# tableNum(TableName) — used in QueryBuildDataSource.addDataSource(tableNum(SalesTable)).
+_XPP_TABLE_NUM_RE = re.compile(
+    r"\btableNum\s*\(\s*(?P<table>[A-Za-z_]\w*)\s*\)", re.IGNORECASE,
+)
+# fieldNum(TableName, FieldName) — used in QueryBuildRange.addRange(fieldNum(T, F)).
+_XPP_FIELD_NUM_RE = re.compile(
+    r"\bfieldNum\s*\(\s*(?P<table>[A-Za-z_]\w*)\s*,\s*(?P<field>[A-Za-z_]\w*)\s*\)",
     re.IGNORECASE,
 )
 _XPP_IMPLEMENTS_RE = re.compile(
@@ -1517,6 +1540,36 @@ class CodeParser:
                 line=line_start + method_source[: access.start()].count("\n"),
                 extra=edge_extra,
             ))
+        # "from" variant: select Field1, Field2 from TableName / select sum(F) from T.
+        # Supplements _XPP_SELECT_RE for cases where field expressions precede FROM.
+        for from_m in _XPP_SELECT_FROM_RE.finditer(method_source):
+            table = from_m.group("table")
+            if table.lower() in _XPP_KEYWORDS or table.lower() in _XPP_SELECT_MODIFIERS:
+                continue
+            edges.append(EdgeInfo(
+                kind="ACCESSES",
+                source=method_qn,
+                target=table,
+                file_path=file_path,
+                line=line_start + method_source[: from_m.start()].count("\n"),
+                extra={"xpp_ref_kind": "table"},
+            ))
+            # Emit individual field references from the prefix (between keyword and FROM).
+            prefix = from_m.group("prefix") or ""
+            for word_m in re.finditer(r"[A-Za-z_]\w*", prefix):
+                word = word_m.group()
+                wl = word.lower()
+                if (wl not in _XPP_KEYWORDS
+                        and wl not in _XPP_SELECT_MODIFIERS
+                        and wl not in _XPP_AGG_FN_NAMES):
+                    edges.append(EdgeInfo(
+                        kind="ACCESSES",
+                        source=method_qn,
+                        target=word,
+                        file_path=file_path,
+                        line=line_start + method_source[: from_m.start()].count("\n"),
+                        extra={"xpp_ref_kind": "select_field"},
+                    ))
         for join_match in _XPP_JOIN_RE.finditer(method_source):
             target = join_match.group(1)
             if target.lower() in _XPP_KEYWORDS:
@@ -1581,6 +1634,31 @@ class CodeParser:
                 line=line_start + method_source[: sd_match.start()].count("\n"),
                 extra={"xpp_ref_kind": "sysdaquery"},
             ))
+        # tableNum(TableName) — QueryBuildDataSource.addDataSource(tableNum(SalesTable)).
+        for tn_m in _XPP_TABLE_NUM_RE.finditer(method_source):
+            table = tn_m.group("table")
+            if table.lower() not in _XPP_KEYWORDS:
+                edges.append(EdgeInfo(
+                    kind="ACCESSES",
+                    source=method_qn,
+                    target=table,
+                    file_path=file_path,
+                    line=line_start + method_source[: tn_m.start()].count("\n"),
+                    extra={"xpp_ref_kind": "tablenum"},
+                ))
+        # fieldNum(TableName, FieldName) — QueryBuildRange.addRange(fieldNum(T, F)).
+        for fn_m in _XPP_FIELD_NUM_RE.finditer(method_source):
+            table = fn_m.group("table")
+            field = fn_m.group("field")
+            if table.lower() not in _XPP_KEYWORDS:
+                edges.append(EdgeInfo(
+                    kind="ACCESSES",
+                    source=method_qn,
+                    target=f"{table}.{field}",
+                    file_path=file_path,
+                    line=line_start + method_source[: fn_m.start()].count("\n"),
+                    extra={"xpp_ref_kind": "fieldnum", "xpp_table": table},
+                ))
         return NodeInfo(
             kind="Function",
             name=method_name,

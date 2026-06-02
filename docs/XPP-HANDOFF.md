@@ -471,25 +471,35 @@ Result: **115 passed** (was 96 at session start; +19 new tests).
 
 ---
 
-## What Is Still Missing (updated after session 4)
+## What Is Still Missing (updated after session 5)
 
-### 1. `Query*` object semantics
-
-`QueryRun`, `QueryBuildDataSource.addDataSource()`, `QueryBuildRange` etc. are class instantiation + instance-call patterns. Instance-call inference now covers these partially (variable declarations → `QueryRun.next()` resolves to `QueryRun.next`), but the *table name* inside `addDataSource(tableNum(SalesTable))` is not yet extracted as an ACCESSES edge.
-
-### 2. Higher-confidence table-name capture from complex select forms
-
-Complex selects like `select Field1, Field2 from SalesTable` (explicit field list, `from` keyword variant) are not currently captured. The D365 X++ `select` statement has two forms:
-- `select [mods] recBuf ...`  ← current regex handles
-- `select Field, Field from recBuf ...`  ← not yet handled
-
-### 3. Incremental update behavior on real package trees
+### 1. Incremental update behavior on real package trees
 
 The `update` command (`incremental_update`) with `xpp_base_roots` has not been validated against the real `RARnDInitiatives` repo. Known unknowns: file-change detection for XML metadata, stale-node cleanup on rename.
 
-### 4. WRAPS edge count from large-repo run
+---
 
-The background resolver (launched in session 3) completed but output was not captured. See resume checklist step 5 to measure WRAPS edges generated for the real repo.
+## Session 5 — What Was Completed
+
+### 1. `select Field, Field from Table` syntax support (DONE)
+
+- Added `_XPP_SELECT_FROM_RE` supplemental regex that specifically matches the `from TableName` form (handles `select Field1, Field2 from Table` and `select sum(Amount) from Table`).
+- Added `_XPP_AGG_FN_NAMES` frozenset to filter aggregate function names when harvesting field refs from the prefix.
+- In `_parse_xpp_method`: new loop emits `ACCESSES(table)` for the table after `from`, plus `ACCESSES(select_field)` for each field name in the prefix (filtering keywords, modifiers, and aggregate fn names).
+
+### 2. `QueryRun`/`QueryBuildDataSource` table-name extraction (DONE)
+
+- Added `_XPP_TABLE_NUM_RE`: captures `tableNum(TableName)` → `ACCESSES(tablenum)` edge. Covers `query.addDataSource(tableNum(SalesTable))`.
+- Added `_XPP_FIELD_NUM_RE`: captures `fieldNum(TableName, FieldName)` → `ACCESSES(fieldnum)` edge with `xpp_table` annotation. Covers `qbds.addRange(fieldNum(SalesTable, SalesId))`.
+- Added `"tablenum": ["AxTable"]` and `"fieldnum": ["AxTable", "AxMap", "AxDataEntityView"]` to `_XPP_ARTIFACT_FOLDERS` in `xpp_resolver.py`.
+
+### Test suite after session 5
+
+```powershell
+& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
+```
+
+Result: **120 passed** (was 115 at session start; +5 new tests in `TestXppDataAccessSemantics`).
 
 ---
 
@@ -506,29 +516,14 @@ $env:UV_CACHE_DIR='C:\GitRepos\code-review-graph\.uv-cache'
 $env:UV_PYTHON_INSTALL_DIR='C:\GitRepos\code-review-graph\.uv-python'
 ```
 
-3. Start from commit `13a25c6`.
+3. Start from current HEAD.
 4. Re-run the focused validation first:
 
 ```powershell
 & 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
 ```
 
-Expected: **115 passed**.
+Expected: **120 passed**.
 
-5. To get final WRAPS edge count from the large-repo build (and re-run with new CoC improvements):
-
-```powershell
-Set-Location "C:\GitRepos\RARnDInitiatives"
-& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run --project "C:\GitRepos\code-review-graph" python -c "
-from code_review_graph.graph import GraphStore
-from code_review_graph.xpp_resolver import resolve_xpp_metadata
-store = GraphStore('.code-review-graph/graph.db')
-stats = resolve_xpp_metadata(store, base_roots=['C:/Users/Adminb76b72ac39/AppData/Local/Microsoft/Dynamics365/10.0.2527.78/PackagesLocalDirectory'])
-print(stats)
-"
-```
-
-6. Suggested next work (in priority order):
-   1. `select Field from Table` syntax support (explicit field list + `from` keyword)
-   2. `QueryRun`/`QueryBuildDataSource` table-name extraction from `addDataSource(tableNum(X))`
-   3. Incremental update validation against `RARnDInitiatives`
+5. Suggested next work:
+   - Incremental update validation against `RARnDInitiatives` (`update` command with `--xpp-base-root`)
