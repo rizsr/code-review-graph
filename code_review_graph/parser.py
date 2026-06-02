@@ -184,13 +184,46 @@ _XPP_VAR_DECL_RE = re.compile(
     r"([A-Z][A-Za-z_][\w<>\[\]]*)\s+([a-z_]\w*)\s*(?:;|=|,)",
     re.MULTILINE,
 )
+# Select modifiers that appear between the select keyword and the table/variable name.
+_XPP_SELECT_MODIFIERS: frozenset[str] = frozenset({
+    "firstonly", "firstonly1", "firstonly10", "firstonly100", "firstonly1000",
+    "forupdate", "crosscompany", "reverse", "forceliterals", "forcenestedloop",
+    "forceplaceholders", "generateonly", "optimisticlock", "pessimisticlock",
+    "repeatableread", "validtimestate", "nofetch",
+})
+# Captures: keyword, optional modifiers (word tokens), then the table/record-buffer name.
+# The modifiers group captures everything between the keyword and the final word so we
+# can extract the modifier list separately.
 _XPP_SELECT_RE = re.compile(
-    r"\b(?:while\s+select|select|insert_recordset|update_recordset|delete_from)\s+"
-    r"(?:[A-Za-z_]+\s+)*([A-Za-z_]\w*)",
+    r"\b(?P<op>while\s+select|select|insert_recordset|update_recordset|delete_from)"
+    r"\s+(?P<mods>(?:[A-Za-z_]\w*\s+)*?)(?P<table>[A-Za-z_]\w*)"
+    r"(?=\s*(?:;|\(|where\b|join\b|order\b|group\b|exists\b|notexists\b|,|\n|$))",
     re.IGNORECASE,
 )
 _XPP_JOIN_RE = re.compile(
     r"\b(?:exists\s+join|notexists\s+join|outer\s+join|join)\s+([A-Za-z_]\w*)",
+    re.IGNORECASE,
+)
+# Aggregate functions in select: sum(field), count(field), max(field) etc.
+_XPP_AGGREGATE_RE = re.compile(
+    r"\b(?P<agg>sum|count|max|min|avg|maxof|minof|sumof|avgof|countof)\s*\(\s*(?P<field>[A-Za-z_]\w*)\s*\)",
+    re.IGNORECASE,
+)
+# order by / group by field references after select statement.
+_XPP_ORDER_BY_RE = re.compile(
+    r"\border\s+by\s+(?P<fields>[A-Za-z_][\w\s,\.]*?)(?=\s*(?:where\b|group\b|join\b|;|\n|$))",
+    re.IGNORECASE,
+)
+_XPP_GROUP_BY_RE = re.compile(
+    r"\bgroup\s+by\s+(?P<fields>[A-Za-z_][\w\s,\.]*?)(?=\s*(?:where\b|order\b|join\b|;|\n|$))",
+    re.IGNORECASE,
+)
+# SysDa query API: SysDaQueryObject, SysDaSelectParameters etc.
+_XPP_SYSDAQUERY_RE = re.compile(
+    r"\bnew\s+(SysDa(?:QueryObject|SelectParameters|AscendingOrderByExpression"
+    r"|DescendingOrderByExpression|QueryObject|DataSourceExpression"
+    r"|FieldListWithAllDataSources|ContainsExpression|AndExpression|OrExpression"
+    r"|NotExpression|EqualsExpression|InExpression|NotInExpression|TableBufferRecord))\s*\(",
     re.IGNORECASE,
 )
 _XPP_IMPLEMENTS_RE = re.compile(
@@ -1413,16 +1446,25 @@ class CodeParser:
             method_source, method_qn, file_path, line_start, edges,
         )
         for access in _XPP_SELECT_RE.finditer(method_source):
-            target = access.group(1)
-            if target.lower() in _XPP_KEYWORDS:
+            table = access.group("table")
+            if table.lower() in _XPP_KEYWORDS or table.lower() in _XPP_SELECT_MODIFIERS:
                 continue
+            # Extract which modifiers were present.
+            mods_raw = (access.group("mods") or "").lower().split()
+            modifiers = [m for m in mods_raw if m in _XPP_SELECT_MODIFIERS]
+            edge_extra: dict = {"xpp_ref_kind": "table"}
+            if modifiers:
+                edge_extra["xpp_select_modifiers"] = modifiers
+            op = access.group("op").lower().replace(" ", "_")
+            if op != "select" and op != "while_select":
+                edge_extra["xpp_select_op"] = op
             edges.append(EdgeInfo(
                 kind="ACCESSES",
                 source=method_qn,
-                target=target,
+                target=table,
                 file_path=file_path,
                 line=line_start + method_source[: access.start()].count("\n"),
-                extra={"xpp_ref_kind": "table"},
+                extra=edge_extra,
             ))
         for join_match in _XPP_JOIN_RE.finditer(method_source):
             target = join_match.group(1)
@@ -1435,6 +1477,58 @@ class CodeParser:
                 file_path=file_path,
                 line=line_start + method_source[: join_match.start()].count("\n"),
                 extra={"xpp_ref_kind": "join"},
+            ))
+        # Aggregate function field references.
+        for agg_match in _XPP_AGGREGATE_RE.finditer(method_source):
+            field = agg_match.group("field")
+            if field.lower() in _XPP_KEYWORDS:
+                continue
+            edges.append(EdgeInfo(
+                kind="ACCESSES",
+                source=method_qn,
+                target=field,
+                file_path=file_path,
+                line=line_start + method_source[: agg_match.start()].count("\n"),
+                extra={
+                    "xpp_ref_kind": "aggregate",
+                    "xpp_aggregate_fn": agg_match.group("agg").lower(),
+                },
+            ))
+        # order by field references.
+        for ob_match in _XPP_ORDER_BY_RE.finditer(method_source):
+            for raw_field in ob_match.group("fields").split(","):
+                field = raw_field.strip().split(".")[-1].strip()
+                if field and field.lower() not in _XPP_KEYWORDS:
+                    edges.append(EdgeInfo(
+                        kind="ACCESSES",
+                        source=method_qn,
+                        target=field,
+                        file_path=file_path,
+                        line=line_start + method_source[: ob_match.start()].count("\n"),
+                        extra={"xpp_ref_kind": "order_field"},
+                    ))
+        # group by field references.
+        for gb_match in _XPP_GROUP_BY_RE.finditer(method_source):
+            for raw_field in gb_match.group("fields").split(","):
+                field = raw_field.strip().split(".")[-1].strip()
+                if field and field.lower() not in _XPP_KEYWORDS:
+                    edges.append(EdgeInfo(
+                        kind="ACCESSES",
+                        source=method_qn,
+                        target=field,
+                        file_path=file_path,
+                        line=line_start + method_source[: gb_match.start()].count("\n"),
+                        extra={"xpp_ref_kind": "group_field"},
+                    ))
+        # SysDa query API detection — mark ACCESSES edges with xpp_sysdaquery.
+        for sd_match in _XPP_SYSDAQUERY_RE.finditer(method_source):
+            edges.append(EdgeInfo(
+                kind="ACCESSES",
+                source=method_qn,
+                target=sd_match.group(1),
+                file_path=file_path,
+                line=line_start + method_source[: sd_match.start()].count("\n"),
+                extra={"xpp_ref_kind": "sysdaquery"},
             ))
         return NodeInfo(
             kind="Function",

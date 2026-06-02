@@ -1035,3 +1035,200 @@ class TestXppBaseIndexPerformance:
             for entries in index.values()
             for _, path in entries
         )
+
+
+class TestXppDataAccessSemantics:
+    """Richer SELECT/data-access edge extraction: modifiers, aggregates, order/group by, SysDa."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _make_class_xml(self, tmp_path, name: str, method_source: str):
+        xml_path = tmp_path / "Metadata" / "Pkg" / "Pkg" / "AxClass" / f"{name}.xml"
+        xml_path.parent.mkdir(parents=True, exist_ok=True)
+        xml_path.write_text(f"""<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>{name}</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class {name}
+{{
+}}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>run</Name>
+        <Source><![CDATA[
+{method_source}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""", encoding="utf-8")
+        return xml_path
+
+    def test_select_with_firstonly_modifier(self, tmp_path):
+        """firstOnly modifier is captured in xpp_select_modifiers on the ACCESSES edge."""
+        xml_path = self._make_class_xml(tmp_path, "TestMod", """
+public void run()
+{
+    select firstOnly CustTable where CustTable.AccountNum == "C001";
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        table_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.target == "CustTable"
+            and e.extra.get("xpp_ref_kind") == "table"
+        ]
+        assert table_edges, "Expected ACCESSES edge for CustTable"
+        assert "firstonly" in table_edges[0].extra.get("xpp_select_modifiers", [])
+
+    def test_select_with_forupdate_modifier(self, tmp_path):
+        """forUpdate modifier is captured."""
+        xml_path = self._make_class_xml(tmp_path, "TestForUpdate", """
+public void run()
+{
+    select forUpdate SalesTable where SalesTable.SalesId == salesId;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        table_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.target == "SalesTable"
+        ]
+        assert table_edges
+        assert "forupdate" in table_edges[0].extra.get("xpp_select_modifiers", [])
+
+    def test_select_multiple_modifiers(self, tmp_path):
+        """Multiple modifiers on one select are all captured."""
+        xml_path = self._make_class_xml(tmp_path, "TestMultiMod", """
+public void run()
+{
+    select forUpdate crossCompany firstOnly VendTable;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        table_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.target == "VendTable"
+        ]
+        assert table_edges
+        mods = table_edges[0].extra.get("xpp_select_modifiers", [])
+        assert "forupdate" in mods
+        assert "crosscompany" in mods
+        assert "firstonly" in mods
+
+    def test_select_no_modifiers_no_modifier_key(self, tmp_path):
+        """Plain select without modifiers does NOT set xpp_select_modifiers."""
+        xml_path = self._make_class_xml(tmp_path, "TestNoMod", """
+public void run()
+{
+    select ProjTable;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        table_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.target == "ProjTable"
+        ]
+        assert table_edges
+        assert "xpp_select_modifiers" not in table_edges[0].extra
+
+    def test_aggregate_sum_captured(self, tmp_path):
+        """sum(field) emits ACCESSES(aggregate) with xpp_aggregate_fn=sum."""
+        xml_path = self._make_class_xml(tmp_path, "TestAggSum", """
+public void run()
+{
+    select sum(Amount) from SalesLine where SalesLine.SalesId == salesId;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        agg_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "aggregate"
+        ]
+        assert any(
+            e.target == "Amount" and e.extra.get("xpp_aggregate_fn") == "sum"
+            for e in agg_edges
+        )
+
+    def test_aggregate_count_captured(self, tmp_path):
+        """countof(field) emits ACCESSES(aggregate)."""
+        xml_path = self._make_class_xml(tmp_path, "TestAggCount", """
+public void run()
+{
+    select countof(RecId) from InventTable;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        agg_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "aggregate"
+        ]
+        assert any(e.target == "RecId" for e in agg_edges)
+
+    def test_order_by_field_captured(self, tmp_path):
+        """order by fields emit ACCESSES(order_field) edges."""
+        xml_path = self._make_class_xml(tmp_path, "TestOrderBy", """
+public void run()
+{
+    select SalesTable order by SalesId, CustAccount;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        order_targets = {
+            e.target for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "order_field"
+        }
+        assert "SalesId" in order_targets
+        assert "CustAccount" in order_targets
+
+    def test_group_by_field_captured(self, tmp_path):
+        """group by fields emit ACCESSES(group_field) edges."""
+        xml_path = self._make_class_xml(tmp_path, "TestGroupBy", """
+public void run()
+{
+    select CustAccount from CustTable group by CustAccount;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        group_targets = {
+            e.target for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "group_field"
+        }
+        assert "CustAccount" in group_targets
+
+    def test_sysdaquery_api_detected(self, tmp_path):
+        """new SysDaQueryObject(...) emits ACCESSES(sysdaquery) edge."""
+        xml_path = self._make_class_xml(tmp_path, "TestSysDa", """
+public void run()
+{
+    SysDaQueryObject query = new SysDaQueryObject(tableNum(CustTable));
+    SysDaSelectParameters params = new SysDaSelectParameters();
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        sysdaquery_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "sysdaquery"
+        ]
+        targets = {e.target for e in sysdaquery_edges}
+        assert "SysDaQueryObject" in targets
+        assert "SysDaSelectParameters" in targets
+
+    def test_insert_recordset_op_captured(self, tmp_path):
+        """insert_recordset sets xpp_select_op on the ACCESSES edge."""
+        xml_path = self._make_class_xml(tmp_path, "TestInsertRec", """
+public void run()
+{
+    insert_recordset DestTable(Field1) select Field1 from SrcTable;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        dml_edges = [
+            e for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_select_op") == "insert_recordset"
+        ]
+        assert dml_edges, "Expected insert_recordset ACCESSES edge"
