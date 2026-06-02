@@ -1,6 +1,7 @@
 # Documentation Index
 
 - [USAGE.md](USAGE.md) -- How to install and use
+- [D365-SETUP.md](D365-SETUP.md) -- Setup guide for Dynamics 365 F&O / X++ repositories
 - [FEATURES.md](FEATURES.md) -- What's included, changelog
 - [COMMANDS.md](COMMANDS.md) -- All 30 MCP tools, 5 MCP prompts, skills, and CLI commands
 - [LLM-OPTIMIZED-REFERENCE.md](LLM-OPTIMIZED-REFERENCE.md) -- Token-optimized reference for MCP-capable AI coding agents
