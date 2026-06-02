@@ -514,6 +514,43 @@ Result: **126 passed** (was 115 at session start; +11 new tests).
 
 ---
 
+## Session 6 — What Was Completed (commit `2c520d2`)
+
+This session focused on build-time UX polish and two Windows-specific correctness fixes. No X++ parser changes.
+
+### 1. `tqdm` progress bars during parse (DONE)
+
+- Added optional `tqdm>=4.0` dependency (`pyproject.toml`, `uv.lock`).
+- New `_progress()` helper in `incremental.py` wraps any iterable with a tqdm bar; falls back to a plain stderr counter every 50 items when tqdm is unavailable.
+- Both the serial and parallel parse loops in `full_build()` and `incremental_update()` now show a live progress bar.
+- Removed the old `logger.info("Progress: %d/%d …")` lines that logged at fixed intervals.
+
+### 2. Phase labels during postprocessing (DONE)
+
+- New `_phase(msg)` helper in `tools/build.py` prints labelled steps to stderr.
+- Labels added before each postprocess phase: `Building signatures…`, `Rebuilding FTS index…`, `Detecting flows…`, `Detecting communities…`.
+
+### 3. Better CLI timing and output (DONE)
+
+- `cli.py` `build` and `update` commands now print a progress message before starting (`Building graph for … `).
+- Elapsed time measured with `time.monotonic()` and formatted as `Xs` or `Xm Ys`.
+- Final summary reformatted to compact dot-separated style: `Done  N files · N nodes · N edges · Xs [· N errors]`.
+
+### 4. Windows TOML path fix in daemon (DONE)
+
+- Added `_toml_str()` helper in `daemon.py` that escapes backslashes in Windows paths before writing them into TOML config files. Previously unescaped backslashes produced invalid TOML on Windows.
+
+### 5. Windows WAL cleanup fix in `graph.close()` (DONE)
+
+- Before calling `conn.close()`, `GraphStore.close()` now runs `PRAGMA wal_checkpoint(TRUNCATE)` + `PRAGMA journal_mode=DELETE`.
+- This removes the `-wal`/`-shm` side-files before the handle is released, avoiding `PermissionError WinError 32` during test teardown on Windows + CPython 3.14 (the thread-stack noise seen in earlier sessions).
+
+### Test suite after session 6
+
+Full suite: **all tests passed** (exit code 0). Two tests are skipped (pre-existing). The WAL fix eliminated the teardown `PermissionError` thread dump that appeared in earlier Windows runs.
+
+---
+
 ## Resume Checklist
 
 When resuming:
@@ -527,13 +564,16 @@ $env:UV_CACHE_DIR='C:\GitRepos\code-review-graph\.uv-cache'
 $env:UV_PYTHON_INSTALL_DIR='C:\GitRepos\code-review-graph\.uv-python'
 ```
 
-3. Start from current HEAD (`4a271f2`).
-4. Re-run the focused validation:
+3. Start from current HEAD (`2c520d2`).
+4. Re-run the full suite:
 
 ```powershell
-& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
+uv run pytest tests/ -q
 ```
 
-Expected: **126 passed**.
+Expected: all tests passing, 2 skipped.
 
-5. No known correctness gaps remain. All items from the original roadmap are complete.
+5. No known correctness gaps remain. All items from the original X++ roadmap are complete. Potential future work:
+   - Measure WRAPS edge count from a full large-repo build with base roots (see session 3 checklist step 5).
+   - Incremental update performance on real 356k-file package trees.
+   - SysDa query API coverage expansion.
