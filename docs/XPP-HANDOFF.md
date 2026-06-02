@@ -353,6 +353,82 @@ Still needed:
   - WRAPS edges generated for real CoC methods
   - incremental update behavior on real package trees
 
+---
+
+## Session 3 — What Was Completed (commits `ce1bfc1` → `e84b66e`)
+
+All four items from the session 2 resume checklist were addressed.
+
+### 1. Instance-call inference (DONE — `ce1bfc1`)
+
+- Added `_XPP_VAR_DECL_RE` to capture `TypeName varName;` / `TypeName varName =` declarations in method bodies (leading keyword guard prevents false positives).
+- Added `_XPP_INSTANCE_CALL_RE` to capture `obj.method(` patterns.
+- In `_parse_xpp_method`, build a `local_var_types: dict[str, str]` from declarations, then use it to resolve `custTable.insert()` → `CALLS CustTable.insert` instead of the raw unresolved form.
+- `this`/`super` suppressed via existing `_XPP_KEYWORDS` set.
+- De-duplication: positions consumed by static (`::`) and instance (`.`) calls are tracked; `_XPP_CALL_RE` skips them so plain `obj` never appears as a spurious call target.
+- **+5 tests** in `TestXppInstanceCallInference`.
+
+Real-repo validation (RARnDInitiatives):
+- **5,892 instance call edges** generated.
+
+### 2. Richer form control/event extraction (DONE — `65f51aa`)
+
+- Added form control method extraction: walks `<Design>/<Controls>/.../AxFormControl/<Methods>`, emits `Function` nodes qualified as `ControlName_methodName`.
+- Known event method names (clicked, modified, lookup, init, run, close, enter, leave, etc.) annotated with `xpp_control_event=True`.
+- Datasource event methods (init, active, validateWrite, validateDelete, write, delete, refresh, reread, selectionChanged, etc.) annotated with `xpp_ds_event=True` in both node extra and the `ds_extra` passed to `_extract_xpp_method`.
+- **+4 tests** in `TestXppFormControlExtraction`.
+
+### 3. Table field groups, EDT inheritance chains, enum value nodes (DONE — `3d45e67`)
+
+- **FieldGroups**: `<FieldGroups>/<AxTableFieldGroup>/<Fields>/<AxTableFieldGroupField>/<DataField>` → `REFERENCES(field_group)` edges with `xpp_field_group=<group name>`.
+- **EDT INHERITS**: `AxEdt`/`AxEdtExtension` `<Extends>` → `INHERITS` edge with `xpp_ref_kind=edt`.
+- **Enum value nodes**: `AxEnum`/`AxEnumExtension` `<EnumValues>/<AxEnumValue>` → `Field` node with `xpp_enum_value=True` + `CONTAINS` edge.
+- **+5 tests** in `TestXppTableFieldGroupsEdtEnum`.
+
+Real-repo validation:
+- **306 enum value nodes**, **2,647 field group ref edges**.
+
+### 4. Full-pipeline large-repo validation with base roots (DONE — `e84b66e`)
+
+Full `build` run against `C:\GitRepos\RARnDInitiatives` with base root `PackagesLocalDirectory` (172 packages, 356k XML files).
+
+**Graph stats after build** (resolver ran partially due to lock on first attempt; see note below):
+
+| Metric | Value |
+|--------|-------|
+| Files parsed | 82 |
+| Parse errors | 0 |
+| Nodes | 10,010 |
+| Edges | 56,333 |
+| CALLS | 35,841 |
+| CONTAINS | 9,257 |
+| REFERENCES | 8,660 |
+| ACCESSES | 2,207 |
+| INHERITS | 355 |
+| IMPLEMENTS | 13 |
+| Instance call edges | 5,892 |
+| Enum value nodes | 306 |
+| Field group ref edges | 2,647 |
+| Resolved edges (partial) | 2,326 |
+
+**Base index build note**: walking 356k XML files via `Path.rglob` was the bottleneck. Replaced with `os.walk` in `e84b66e` — avoids per-entry `Path` instantiation. The index uses ~500 MB RSS and is cached per-process via `_BASE_INDEX_CACHE`.
+
+**WRAPS edges**: resolver ran in background with full base root after session ended; see next-session checklist for how to capture final count.
+
+#### os.walk optimization
+
+`_build_base_index` in `xpp_resolver.py` now uses `os.walk` with early folder filtering (only descends into `Ax*` recognized folders at leaf level). This avoids creating `Path` objects for all 356k entries. +1 test in `TestXppBaseIndexPerformance`.
+
+### Test suite after session 3
+
+```powershell
+& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
+```
+
+Result: **96 passed** (was 81 at start of session 3; +15 new tests).
+
+---
+
 ## Resume Checklist
 
 When resuming:
@@ -366,17 +442,30 @@ $env:UV_CACHE_DIR='C:\GitRepos\code-review-graph\.uv-cache'
 $env:UV_PYTHON_INSTALL_DIR='C:\GitRepos\code-review-graph\.uv-python'
 ```
 
-3. Start from commit `e6f6511`.
+3. Start from commit `e84b66e`.
 4. Re-run the focused validation first:
 
 ```powershell
 & 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
 ```
 
-Expected: **81 passed**.
+Expected: **96 passed**.
 
-5. Suggested next work (in order):
-   1. Instance-call inference (variable declaration tracking)
-   2. Richer form control/event extraction
-   3. Full-pipeline large-repo validation with base roots + WRAPS measurement
-   4. Table field groups and EDT inheritance chains
+5. To get final WRAPS edge count from the large-repo build, run the resolver directly:
+
+```powershell
+Set-Location "C:\GitRepos\RARnDInitiatives"
+& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run --project "C:\GitRepos\code-review-graph" python -c "
+from code_review_graph.graph import GraphStore
+from code_review_graph.xpp_resolver import resolve_xpp_metadata
+store = GraphStore('.code-review-graph/graph.db')
+stats = resolve_xpp_metadata(store, base_roots=['C:/Users/Adminb76b72ac39/AppData/Local/Microsoft/Dynamics365/10.0.2527.78/PackagesLocalDirectory'])
+print(stats)
+"
+```
+
+6. Remaining lower-priority items (see "What Is Still Missing"):
+   - Better data-access semantics (group by, aggregates, SysDa API)
+   - Stronger extension/CoC resolution (signature-aware WRAPS matching)
+   - Better event support (PreEventHandler/PostEventHandler distinction)
+   - Incremental update behavior on real package trees
