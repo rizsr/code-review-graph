@@ -529,3 +529,148 @@ public void refs()
         assert ("dataentity", "SalesOrderEntity") in ref_targets
         assert ("menu", "MainMenu") in ref_targets
         assert ("securityrole", "SystemAdministrator") in ref_targets
+
+
+class TestXppInstanceCallInference:
+    """Variable declaration tracking enables obj.method() → TypeName.method() resolution."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _make_class_xml(
+        self,
+        tmp_path,
+        folder: str,
+        name: str,
+        declaration: str,
+        methods: str = "",
+    ):
+        xml_path = tmp_path / "Metadata" / "Pkg" / "Pkg" / folder / f"{name}.xml"
+        methods_xml = f"<Methods>{methods}</Methods>" if methods else ""
+        body = f"""<?xml version="1.0" encoding="utf-8"?>
+<{folder}>
+  <Name>{name}</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+{declaration}
+]]></Declaration>
+    {methods_xml}
+  </SourceCode>
+</{folder}>
+"""
+        xml_path.parent.mkdir(parents=True, exist_ok=True)
+        xml_path.write_text(body, encoding="utf-8")
+        return xml_path
+
+    def test_resolved_instance_call(self, tmp_path):
+        """custTable.find() with CustTable custTable; → CALLS edge to CustTable.find."""
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "TestResolved",
+            "public class TestResolved\n{",
+            methods="""
+      <Method>
+        <Name>run</Name>
+        <Source><![CDATA[
+public void run()
+{
+    CustTable custTable;
+    custTable = CustTable::find("C001");
+    custTable.insert();
+}
+]]></Source>
+      </Method>""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        call_targets = {e.target for e in edges if e.kind == "CALLS"}
+        # Instance call resolved via var-decl type map
+        assert "CustTable.insert" in call_targets
+
+    def test_unresolved_instance_call_kept(self, tmp_path):
+        """obj.method() without a known var decl still emits an edge (unresolved form)."""
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "TestUnresolved",
+            "public class TestUnresolved\n{",
+            methods="""
+      <Method>
+        <Name>run</Name>
+        <Source><![CDATA[
+public void run()
+{
+    unknown.doSomething();
+}
+]]></Source>
+      </Method>""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        call_targets = {e.target for e in edges if e.kind == "CALLS"}
+        assert "unknown.doSomething" in call_targets
+
+    def test_instance_call_not_double_emitted_as_plain_call(self, tmp_path):
+        """obj.method() must NOT also appear as a plain CALLS edge for 'obj'."""
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "TestNoDuplicate",
+            "public class TestNoDuplicate\n{",
+            methods="""
+      <Method>
+        <Name>run</Name>
+        <Source><![CDATA[
+public void run()
+{
+    SalesTable salesTable;
+    salesTable.update();
+}
+]]></Source>
+      </Method>""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        calls = [(e.target, e.extra) for e in edges if e.kind == "CALLS"]
+        # Resolved target present
+        assert any(t == "SalesTable.update" for t, _ in calls)
+        # 'salesTable' alone must NOT appear as a plain call target
+        assert not any(t == "salesTable" for t, _ in calls)
+
+    def test_multiple_var_declarations(self, tmp_path):
+        """Multiple typed vars in one method body are all tracked."""
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "TestMultiVar",
+            "public class TestMultiVar\n{",
+            methods="""
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process()
+{
+    CustTable custTable;
+    VendTable vendTable;
+    custTable.insert();
+    vendTable.delete();
+}
+]]></Source>
+      </Method>""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        call_targets = {e.target for e in edges if e.kind == "CALLS"}
+        assert "CustTable.insert" in call_targets
+        assert "VendTable.delete" in call_targets
+
+    def test_this_and_super_ignored(self, tmp_path):
+        """this.method() and super.method() must not be emitted as CALLS edges."""
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "TestKeywords",
+            "public class TestKeywords\n{",
+            methods="""
+      <Method>
+        <Name>run</Name>
+        <Source><![CDATA[
+public void run()
+{
+    this.helper();
+    super.run();
+}
+]]></Source>
+      </Method>""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        call_targets = {e.target for e in edges if e.kind == "CALLS"}
+        assert "this.helper" not in call_targets
+        assert "super.run" not in call_targets

@@ -174,7 +174,16 @@ _XPP_COMPILETIME_RE = re.compile(
     re.IGNORECASE,
 )
 _XPP_STATIC_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)::([A-Za-z_]\w*)\s*\(")
+# Matches `obj.method(` — must be checked before _XPP_CALL_RE so plain calls don't steal them.
+_XPP_INSTANCE_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(")
 _XPP_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+# Captures local variable declarations: `TypeName varName` optionally followed by ; or =
+# Excludes lines that start with return/if/while/for/switch to avoid false positives.
+_XPP_VAR_DECL_RE = re.compile(
+    r"^\s*(?!(?:return|if|while|for|switch|else|new|throw|try|catch)\b)"
+    r"([A-Z][A-Za-z_][\w<>\[\]]*)\s+([a-z_]\w*)\s*(?:;|=|,)",
+    re.MULTILINE,
+)
 _XPP_SELECT_RE = re.compile(
     r"\b(?:while\s+select|select|insert_recordset|update_recordset|delete_from)\s+"
     r"(?:[A-Za-z_]+\s+)*([A-Za-z_]\w*)",
@@ -1346,7 +1355,19 @@ class CodeParser:
         if re.search(rf"\bnext\s+{re.escape(method_name)}\s*\(", method_source):
             node_extra["xpp_calls_next"] = True
 
+        # Build a local var→type map so obj.method() can be resolved to TypeName.method().
+        local_var_types: dict[str, str] = {}
+        for vd in _XPP_VAR_DECL_RE.finditer(method_source):
+            type_name, var_name = vd.group(1), vd.group(2)
+            if type_name.lower() not in _XPP_KEYWORDS and var_name.lower() not in _XPP_KEYWORDS:
+                local_var_types[var_name] = type_name
+
+        # Collect positions already consumed by static (::) and instance (.) calls
+        # so _XPP_CALL_RE doesn't double-emit them.
+        consumed_starts: set[int] = set()
+
         for static_call in _XPP_STATIC_CALL_RE.finditer(method_source):
+            consumed_starts.add(static_call.start())
             edges.append(EdgeInfo(
                 kind="CALLS",
                 source=method_qn,
@@ -1354,7 +1375,30 @@ class CodeParser:
                 file_path=file_path,
                 line=line_start + method_source[: static_call.start()].count("\n"),
             ))
+
+        for inst_call in _XPP_INSTANCE_CALL_RE.finditer(method_source):
+            consumed_starts.add(inst_call.start())
+            var_name, method_called = inst_call.group(1), inst_call.group(2)
+            if var_name.lower() in _XPP_KEYWORDS or method_called.lower() in _XPP_KEYWORDS:
+                continue
+            resolved_type = local_var_types.get(var_name)
+            if resolved_type:
+                target = f"{resolved_type}.{method_called}"
+            else:
+                target = f"{var_name}.{method_called}"
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=method_qn,
+                target=target,
+                file_path=file_path,
+                line=line_start + method_source[: inst_call.start()].count("\n"),
+                extra={"xpp_instance_call": True, "xpp_var": var_name}
+                if resolved_type else {"xpp_instance_call": True},
+            ))
+
         for call in _XPP_CALL_RE.finditer(method_source):
+            if call.start() in consumed_starts:
+                continue
             target = call.group(1)
             if target.lower() in _XPP_KEYWORDS or target == method_name:
                 continue
