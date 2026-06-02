@@ -294,64 +294,23 @@ Test suite: **81 passed** (was 72), +9 new test cases in `TestXppArtifactDepth` 
 
 The current implementation is substantially deeper, but still not full X++ support.
 
-### 1. Instance-call inference
+### 1. Instance-call inference — **DONE in session 3** (`ce1bfc1`)
 
-Still needed:
+### 2. Better data-access semantics — **DONE in session 4** (`aecc75e`)
 
-- `obj.method()` calls can't be resolved without type inference
-- Variable declarations like `CustTable custTable; custTable.find()` need tracking
+Remaining gap: `select Field, Field from Table` syntax and `Query*` object table extraction (see session 4 section).
 
-### 2. Better data-access semantics
+### 3. Richer form/control extraction — **DONE in session 3** (`65f51aa`)
 
-Still needed:
+### 4. Table/EDT inheritance + field groups — **DONE in session 3** (`3d45e67`)
 
-- `group by`, aggregates (`maxof`, `minof`, `sumof`, `avgof`, `countof`)
-- `firstOnly`, `forUpdate`, `crossCompany` modifiers (now suppressed from noise but not tracked)
-- SysDa API coverage (`SysDaQueryObject`, `SysDaSelectParameters`, etc.)
-- `Query*` object semantics
-- Higher-confidence table-name capture from complex select forms
+### 5. Stronger extension and CoC resolution — **DONE in session 4** (`e4220b8`)
 
-### 3. Richer form/control extraction
+### 6. Better event support — **DONE in session 4** (`13a25c6`)
 
-Still needed:
+### 7. Full-pipeline large-repo validation with base roots — **DONE in session 3** (`e84b66e`)
 
-- form control methods (from `<Design>/<Controls>/.../<Methods>`)
-- form control events (click, modified, etc.)
-- datasource events (init, active, validateWrite, etc.) — partially done but not for controls
-
-### 4. Table/EDT inheritance + field groups
-
-Still needed from XML:
-
-- `<FieldGroups>` → field group membership edges
-- EDT `<Extends>` chain following for type resolution
-- Enum value nodes
-
-### 5. Stronger extension and CoC resolution
-
-Still needed:
-
-- signature-aware method matching in WRAPS resolution
-- handling extension naming variants beyond `_Extension` suffix
-- more reliable `next` resolution for methods with different signatures
-
-### 6. Better event support
-
-Still needed:
-
-- form control events (attribute-based `DataEventHandler`, `FormDataSourceEventHandler`, etc.)
-- canonical publisher/member resolution for `AxEventSubscription`
-- `PreEventHandler` vs `PostEventHandler` distinction in edges
-
-### 7. Full-pipeline large-repo validation with base roots
-
-Still needed:
-
-- run `full_build` with `--xpp-base-root PackagesLocalDirectory` and measure:
-  - lazy load hit rate (what fraction of references resolve to base artifacts)
-  - index build time for 356k-file base
-  - WRAPS edges generated for real CoC methods
-  - incremental update behavior on real package trees
+See session 3 and 4 sections for details. WRAPS edge count from large-repo run still needs measurement (see resume checklist step 5).
 
 ---
 
@@ -469,3 +428,107 @@ print(stats)
    - Stronger extension/CoC resolution (signature-aware WRAPS matching)
    - Better event support (PreEventHandler/PostEventHandler distinction)
    - Incremental update behavior on real package trees
+
+---
+
+## Session 4 — What Was Completed (commits `aecc75e` → `13a25c6`)
+
+All three remaining items from the session 3 checklist were addressed.
+
+### 1. Better data-access semantics (DONE — `aecc75e`)
+
+- **SELECT modifiers**: `firstOnly`, `forUpdate`, `crossCompany`, `reverse`, `nofetch`, etc. captured in `xpp_select_modifiers: [...]` on ACCESSES edges. Plain selects carry no key.
+- **DML op tracking**: `insert_recordset`/`update_recordset`/`delete_from` set `xpp_select_op` on the ACCESSES edge.
+- **Aggregates**: `sum(field)`, `count(field)`, `maxof(field)`, `sumof(field)`, etc. → `ACCESSES(aggregate)` edges with `xpp_aggregate_fn`.
+- **`order by` / `group by`**: each referenced field emits `ACCESSES(order_field)` / `ACCESSES(group_field)`.
+- **SysDa query API**: `new SysDaQueryObject(...)`, `new SysDaSelectParameters(...)`, etc. → `ACCESSES(sysdaquery)` edges.
+- Rewrote `_XPP_SELECT_RE` with named groups (`op`, `mods`, `table`) and explicit lookahead for valid terminators (`;`, `(`, `where`, `join`, `order`, `group`, etc.).
+- Added `_XPP_SELECT_MODIFIERS` frozenset for reliable modifier vs. table-name disambiguation.
+- **+10 tests** in `TestXppDataAccessSemantics`.
+
+### 2. Stronger extension/CoC resolution (DONE — `e4220b8`)
+
+- **Naming fallback**: classes named `FooBar_Extension` (or `FooBarExtension`) without `[ExtensionOf(...)]` attribute now have their CoC target inferred by stripping the suffix. WRAPS edges are generated without requiring the attribute.
+- **Signature-aware candidate selection**: new `_pick_best_wraps_candidate()` prefers the base method whose parameter count matches the extension method; falls back to first candidate (name-only) when no count-match exists.
+- **Confidence annotation**: WRAPS edges carry `xpp_wraps_confidence: "exact"` (param-count matched) or `"name_only"` (fell back).
+- **+3 tests** in `TestXppCoCResolution`.
+
+### 3. Better event support (DONE — `13a25c6`)
+
+- **`AxEventSubscription <EventType>`**: `Pre`/`Post`/`Delegate` extracted → `xpp_event_type` on HANDLES edges.
+- **`<PublisherEvent>` vs `<PublisherMethod>`**: delegate events preferred; `xpp_event_kind: delegate|method` set on each HANDLES edge.
+- **Attribute-based event handlers**: `[DataEventHandler(...)]`, `[FormDataSourceEventHandler(...)]`, `[FormControlEventHandler(...)]`, `[FormDataFieldEventHandler(...)]`, `[SysDelegate(...)]` on methods → HANDLES edges + `xpp_event_handler=True` on Function node.
+- Fixed nested-paren args regex bug: changed `[^)]*` to `[^()]*` in `_XPP_EVENT_HANDLER_ATTR_RE` so the greedy outer match doesn't swallow opening parens.
+- **+6 tests** in `TestXppEventSupport`.
+
+### Test suite after session 4
+
+```powershell
+& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
+```
+
+Result: **115 passed** (was 96 at session start; +19 new tests).
+
+---
+
+## What Is Still Missing (updated after session 4)
+
+### 1. `Query*` object semantics
+
+`QueryRun`, `QueryBuildDataSource.addDataSource()`, `QueryBuildRange` etc. are class instantiation + instance-call patterns. Instance-call inference now covers these partially (variable declarations → `QueryRun.next()` resolves to `QueryRun.next`), but the *table name* inside `addDataSource(tableNum(SalesTable))` is not yet extracted as an ACCESSES edge.
+
+### 2. Higher-confidence table-name capture from complex select forms
+
+Complex selects like `select Field1, Field2 from SalesTable` (explicit field list, `from` keyword variant) are not currently captured. The D365 X++ `select` statement has two forms:
+- `select [mods] recBuf ...`  ← current regex handles
+- `select Field, Field from recBuf ...`  ← not yet handled
+
+### 3. Incremental update behavior on real package trees
+
+The `update` command (`incremental_update`) with `xpp_base_roots` has not been validated against the real `RARnDInitiatives` repo. Known unknowns: file-change detection for XML metadata, stale-node cleanup on rename.
+
+### 4. WRAPS edge count from large-repo run
+
+The background resolver (launched in session 3) completed but output was not captured. See resume checklist step 5 to measure WRAPS edges generated for the real repo.
+
+---
+
+## Resume Checklist
+
+When resuming:
+
+1. Ensure `uv` is on PATH or call it directly:
+   - `C:\Users\Adminb76b72ac39\.local\bin\uv.exe`
+2. Set workspace-local `uv` dirs before tests:
+
+```powershell
+$env:UV_CACHE_DIR='C:\GitRepos\code-review-graph\.uv-cache'
+$env:UV_PYTHON_INSTALL_DIR='C:\GitRepos\code-review-graph\.uv-python'
+```
+
+3. Start from commit `13a25c6`.
+4. Re-run the focused validation first:
+
+```powershell
+& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
+```
+
+Expected: **115 passed**.
+
+5. To get final WRAPS edge count from the large-repo build (and re-run with new CoC improvements):
+
+```powershell
+Set-Location "C:\GitRepos\RARnDInitiatives"
+& 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run --project "C:\GitRepos\code-review-graph" python -c "
+from code_review_graph.graph import GraphStore
+from code_review_graph.xpp_resolver import resolve_xpp_metadata
+store = GraphStore('.code-review-graph/graph.db')
+stats = resolve_xpp_metadata(store, base_roots=['C:/Users/Adminb76b72ac39/AppData/Local/Microsoft/Dynamics365/10.0.2527.78/PackagesLocalDirectory'])
+print(stats)
+"
+```
+
+6. Suggested next work (in priority order):
+   1. `select Field from Table` syntax support (explicit field list + `from` keyword)
+   2. `QueryRun`/`QueryBuildDataSource` table-name extraction from `addDataSource(tableNum(X))`
+   3. Incremental update validation against `RARnDInitiatives`
