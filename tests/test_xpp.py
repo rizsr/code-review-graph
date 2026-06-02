@@ -996,3 +996,42 @@ class TestXppTableFieldGroupsEdtEnum:
         contains_targets = {e.target for e in edges if e.kind == "CONTAINS"}
         assert any("None" in t for t in contains_targets)
         assert any("Check" in t for t in contains_targets)
+
+
+class TestXppBaseIndexPerformance:
+    """Base-index builder uses os.walk so it handles large trees efficiently."""
+
+    def test_index_built_from_simulated_large_tree(self, tmp_path):
+        """Simulate a multi-package tree; verify index only contains Ax* folders."""
+        from code_review_graph.xpp_resolver import _build_base_index, _BASE_INDEX_CACHE
+
+        base = tmp_path / "PackagesLocalDirectory"
+        # Create a realistic 3-package layout with Ax* and non-Ax* folders.
+        for pkg in ("ApplicationSuite", "ApplicationFoundation", "Directory"):
+            for model in (pkg,):
+                for folder in ("AxClass", "AxTable", "SomeOtherFolder"):
+                    d = base / pkg / model / folder
+                    d.mkdir(parents=True)
+                    (d / "Artifact1.xml").write_text("<root/>")
+                    (d / "Artifact2.xml").write_text("<root/>")
+                    (d / "Artifact2.txt").write_text("ignored")  # non-xml
+
+        # Clear cache so this call goes through _build_base_index fresh.
+        key = (str(base.resolve()),)
+        _BASE_INDEX_CACHE.pop(key, None)
+
+        index = _build_base_index([str(base)])
+
+        # Only AxClass and AxTable entries should appear (not SomeOtherFolder).
+        assert "Artifact1" in index
+        assert "Artifact2" in index
+        for stem, entries in index.items():
+            for folder, _path in entries:
+                assert folder in ("AxClass", "AxTable"), f"Unexpected folder: {folder}"
+
+        # Non-xml file should not appear.
+        assert all(
+            str(path).endswith(".xml")
+            for entries in index.values()
+            for _, path in entries
+        )

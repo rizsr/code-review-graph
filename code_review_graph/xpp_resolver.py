@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -228,22 +229,30 @@ def _find_local_artifact(
 
 
 def _build_base_index(base_roots: list[str]) -> dict[str, list[tuple[str, Path]]]:
-    """Index all recognized Ax* XML files in base roots by stem (artifact name)."""
+    """Index all recognized Ax* XML files in base roots by stem (artifact name).
+
+    Uses os.walk rather than Path.rglob for speed on large trees (e.g. 356k-file
+    PackagesLocalDirectory); os.walk avoids per-entry Path instantiation overhead.
+    """
     all_folders = set(XPP_METADATA_OBJECT_KINDS.keys())
     index: dict[str, list[tuple[str, Path]]] = {}
     for root in base_roots:
-        root_path = Path(root)
-        if not root_path.exists():
+        if not os.path.isdir(root):
             continue
         logger.debug("Building X++ base index from %s", root)
-        for xml_path in root_path.rglob("*.xml"):
-            folder = xml_path.parent.name
+        for dirpath, dirnames, filenames in os.walk(root):
+            folder = os.path.basename(dirpath)
             if folder not in all_folders:
                 continue
-            stem = xml_path.stem
-            if stem not in index:
-                index[stem] = []
-            index[stem].append((folder, xml_path))
+            for fname in filenames:
+                if not fname.endswith(".xml"):
+                    continue
+                stem = fname[:-4]  # strip .xml
+                entry = (folder, Path(dirpath) / fname)
+                if stem not in index:
+                    index[stem] = [entry]
+                else:
+                    index[stem].append(entry)
     logger.debug("X++ base index built: %d distinct artifact names", len(index))
     return index
 
