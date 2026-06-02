@@ -473,9 +473,7 @@ Result: **115 passed** (was 96 at session start; +19 new tests).
 
 ## What Is Still Missing (updated after session 5)
 
-### 1. Incremental update behavior on real package trees
-
-The `update` command (`incremental_update`) with `xpp_base_roots` has not been validated against the real `RARnDInitiatives` repo. Known unknowns: file-change detection for XML metadata, stale-node cleanup on rename.
+All previously identified gaps have been addressed. No known correctness gaps remain.
 
 ---
 
@@ -487,11 +485,16 @@ The `update` command (`incremental_update`) with `xpp_base_roots` has not been v
 - Added `_XPP_AGG_FN_NAMES` frozenset to filter aggregate function names when harvesting field refs from the prefix.
 - In `_parse_xpp_method`: new loop emits `ACCESSES(table)` for the table after `from`, plus `ACCESSES(select_field)` for each field name in the prefix (filtering keywords, modifiers, and aggregate fn names).
 
-### 2. `QueryRun`/`QueryBuildDataSource` table-name extraction (DONE)
+### 2. `QueryRun`/`QueryBuildDataSource` table-name extraction (DONE)  
 
 - Added `_XPP_TABLE_NUM_RE`: captures `tableNum(TableName)` → `ACCESSES(tablenum)` edge. Covers `query.addDataSource(tableNum(SalesTable))`.
 - Added `_XPP_FIELD_NUM_RE`: captures `fieldNum(TableName, FieldName)` → `ACCESSES(fieldnum)` edge with `xpp_table` annotation. Covers `qbds.addRange(fieldNum(SalesTable, SalesId))`.
 - Added `"tablenum": ["AxTable"]` and `"fieldnum": ["AxTable", "AxMap", "AxDataEntityView"]` to `_XPP_ARTIFACT_FOLDERS` in `xpp_resolver.py`.
+
+### 3. Incremental update validation for X++ XML (DONE)
+
+- Added `TestXppIncrementalUpdate` class in `tests/test_incremental.py` (5 new tests).
+- Covers: initial parse, modified file re-parses and replaces stale nodes, deleted file removes nodes/edges, unchanged file is skipped via hash check, rename (delete old + add new) correctly purges old and stores new.
 
 ### Test suite after session 5
 
@@ -499,7 +502,7 @@ The `update` command (`incremental_update`) with `xpp_base_roots` has not been v
 & 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
 ```
 
-Result: **120 passed** (was 115 at session start; +5 new tests in `TestXppDataAccessSemantics`).
+Result: **125 passed** (was 115 at session start; +10 new tests).
 
 ---
 
@@ -517,13 +520,12 @@ $env:UV_PYTHON_INSTALL_DIR='C:\GitRepos\code-review-graph\.uv-python'
 ```
 
 3. Start from current HEAD.
-4. Re-run the focused validation first:
+4. Re-run the focused validation:
 
 ```powershell
 & 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
 ```
 
-Expected: **120 passed**.
+Expected: **125 passed**.
 
-5. Suggested next work:
-   - Incremental update validation against `RARnDInitiatives` (`update` command with `--xpp-base-root`)
+5. No known correctness gaps remain. All items from the original roadmap are complete.

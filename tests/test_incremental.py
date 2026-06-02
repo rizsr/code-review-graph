@@ -625,6 +625,136 @@ class TestIncrementalUpdate:
             store.close()
 
 
+class TestXppIncrementalUpdate:
+    """Validate incremental update behavior for X++ metadata XML files."""
+
+    def _make_xpp_xml(self, root, name: str, method_body: str = "") -> object:
+        """Create a minimal AxClass XML in D365 metadata layout."""
+        from pathlib import Path
+        xml_path = root / "Metadata" / "Pkg" / "Pkg" / "AxClass" / f"{name}.xml"
+        xml_path.parent.mkdir(parents=True, exist_ok=True)
+        xml_path.write_text(f"""<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>{name}</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class {name}
+{{
+}}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>run</Name>
+        <Source><![CDATA[
+{method_body}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""", encoding="utf-8")
+        return xml_path
+
+    def _rel(self, root, path) -> str:
+        from pathlib import Path
+        return str(Path(path).relative_to(root))
+
+    def test_xpp_xml_parsed_on_first_update(self, tmp_path):
+        """A D365 XML file added via incremental_update produces nodes in the graph."""
+        xml_path = self._make_xpp_xml(tmp_path, "MyClass")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            result = incremental_update(
+                tmp_path, store,
+                changed_files=[self._rel(tmp_path, xml_path)],
+            )
+            nodes = store.get_nodes_by_file(str(xml_path))
+            assert any(n.kind in ("Class", "Type") for n in nodes), \
+                "Expected Class/Type node for MyClass"
+        finally:
+            store.close()
+
+    def test_xpp_xml_update_replaces_stale_nodes(self, tmp_path):
+        """Modifying an X++ XML replaces old nodes with freshly parsed ones."""
+        xml_path = self._make_xpp_xml(tmp_path, "MyClass", "select CustTable;")
+        rel = self._rel(tmp_path, xml_path)
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            # Initial parse.
+            incremental_update(tmp_path, store, changed_files=[rel])
+            nodes_v1 = store.get_nodes_by_file(str(xml_path))
+            assert nodes_v1
+
+            # Update the XML with a different method body.
+            self._make_xpp_xml(tmp_path, "MyClass", "select SalesTable;")
+
+            result = incremental_update(tmp_path, store, changed_files=[rel])
+            assert result["total_nodes"] > 0, "Expected re-parse of changed XML"
+            nodes_v2 = store.get_nodes_by_file(str(xml_path))
+            assert nodes_v2, "Nodes should still exist after update"
+        finally:
+            store.close()
+
+    def test_xpp_xml_deleted_removes_nodes(self, tmp_path):
+        """Deleting an X++ XML file removes its nodes and edges from the graph."""
+        xml_path = self._make_xpp_xml(tmp_path, "GoneClass")
+        rel = self._rel(tmp_path, xml_path)
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            incremental_update(tmp_path, store, changed_files=[rel])
+            assert store.get_nodes_by_file(str(xml_path)), \
+                "Pre-condition: nodes should exist before delete"
+
+            xml_path.unlink()
+            incremental_update(tmp_path, store, changed_files=[rel])
+            assert not store.get_nodes_by_file(str(xml_path)), \
+                "Nodes should be gone after file deletion"
+        finally:
+            store.close()
+
+    def test_xpp_xml_hash_check_skips_unchanged(self, tmp_path):
+        """A second incremental_update with the same XML content is a no-op (hash match)."""
+        xml_path = self._make_xpp_xml(tmp_path, "StableClass")
+        rel = self._rel(tmp_path, xml_path)
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            incremental_update(tmp_path, store, changed_files=[rel])
+            # Second run with identical file content.
+            result = incremental_update(tmp_path, store, changed_files=[rel])
+            assert result["total_nodes"] == 0, \
+                "Hash match should skip re-parsing unchanged XML"
+            assert result["total_edges"] == 0
+        finally:
+            store.close()
+
+    def test_xpp_xml_rename_purges_old_adds_new(self, tmp_path):
+        """Renaming an X++ XML (delete old + add new) removes old nodes and adds new ones."""
+        old_path = self._make_xpp_xml(tmp_path, "OldClass")
+        old_rel = self._rel(tmp_path, old_path)
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            incremental_update(tmp_path, store, changed_files=[old_rel])
+            assert store.get_nodes_by_file(str(old_path)), "Pre-condition: OldClass nodes"
+
+            # Simulate rename: delete old, create new.
+            old_path.unlink()
+            new_path = self._make_xpp_xml(tmp_path, "NewClass")
+            new_rel = self._rel(tmp_path, new_path)
+
+            incremental_update(
+                tmp_path, store,
+                changed_files=[old_rel, new_rel],
+            )
+
+            assert not store.get_nodes_by_file(str(old_path)), \
+                "Old nodes should be removed after rename"
+            new_nodes = store.get_nodes_by_file(str(new_path))
+            assert any(n.kind in ("Class", "Type") for n in new_nodes), \
+                "New Class node should exist after rename"
+        finally:
+            store.close()
+
+
 class TestParallelParsing:
     def test_parse_single_file(self, tmp_path):
         py_file = tmp_path / "single.py"
