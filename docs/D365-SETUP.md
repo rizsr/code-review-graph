@@ -4,114 +4,43 @@ This guide covers installing and using `code-review-graph` against a D365 Financ
 extension repository. Once set up, AI coding tools (Claude Code, Copilot, Cursor, etc.) can
 query the indexed graph instead of scanning thousands of XML files on every request.
 
+All commands below are for **Windows Command Prompt** (`cmd.exe`).
+
 ---
 
 ## Prerequisites
 
-- Python 3.10+ (or `uv` — recommended)
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) installed
 - Git installed and on PATH
+- `code-review-graph` source cloned locally (e.g. `C:\GitRepos\code-review-graph`)
 - Your D365 extension repository cloned locally (e.g. `C:\GitRepos\RARnDInitiatives`)
 - *(Optional but recommended)* The Microsoft base packages installed locally under
   `PackagesLocalDirectory` — this enables cross-reference resolution into base platform code
 
 ---
 
-## 1. Install
+## 1. Build the graph (first time)
 
-**With uv (recommended):**
+Open **Command Prompt**, navigate to your D365 repo, and run:
 
-```powershell
-uv tool install code-review-graph
+```cmd
+cd C:\GitRepos\RARnDInitiatives
+
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph build --xpp-base-root "C:\Users\<you>\AppData\Local\Microsoft\Dynamics365\10.0.2527.78\PackagesLocalDirectory"
 ```
 
-**With pip:**
+Replace `<you>` with your Windows username.
 
-```powershell
-pip install code-review-graph
-```
+This will:
+1. Walk all `Metadata\<Package>\<Model>\Ax*\*.xml` files in your repo
+2. Parse embedded X++ from each metadata XML
+3. Store the graph in `.code-review-graph\graph.db` inside your repo (excluded from git)
+4. Run the X++ resolver to link extension → base class references and generate WRAPS edges
 
-Verify the install:
+> **Note:** The first build takes a few minutes — it walks both your repo and the base packages
+> directory (typically 350k+ files). Subsequent builds are much faster.
 
-```powershell
-code-review-graph --version
-```
-
----
-
-## 2. Configure the MCP server for your AI tool
-
-Run the install command from inside your repo to auto-detect and configure all supported AI
-tools (Claude Code, Copilot, Cursor, Windsurf, Zed, Continue, etc.):
-
-```powershell
-Set-Location "C:\GitRepos\RARnDInitiatives"
-code-review-graph install
-```
-
-Restart your editor/AI tool after running this. The MCP server will be available immediately
-on next launch.
-
-To target a specific tool only:
-
-```powershell
-code-review-graph install --platform claude-code
-code-review-graph install --platform cursor
-code-review-graph install --platform copilot
-```
-
----
-
-## 3. Configure the X++ base root (optional but recommended)
-
-The base root is the `PackagesLocalDirectory` from your local D365 install. It lets the graph
-resolve references from your extension code into Microsoft's base classes and tables.
-
-**Auto-detection:** If you have D365 installed under the standard path
-(`%LOCALAPPDATA%\Microsoft\Dynamics365\<version>\PackagesLocalDirectory`), the tool finds it
-automatically — no configuration needed.
-
-**To set it explicitly** (saves to `~/.code-review-graph/config.json`):
-
-```powershell
-code-review-graph build --xpp-base-root "C:\Users\<you>\AppData\Local\Microsoft\Dynamics365\10.0.2527.78\PackagesLocalDirectory"
-```
-
-**Via environment variable** (useful in CI):
-
-```powershell
-$env:CRG_XPP_BASE_ROOTS = "C:\...\PackagesLocalDirectory"
-```
-
-**Multiple roots** (semicolon-separated):
-
-```powershell
-$env:CRG_XPP_BASE_ROOTS = "C:\...\PackagesLocalDirectory;D:\...\AnotherRoot"
-```
-
----
-
-## 4. Build the graph (first time)
-
-Navigate to your repo root and run a full build:
-
-```powershell
-Set-Location "C:\GitRepos\RARnDInitiatives"
-code-review-graph build
-```
-
-With explicit base root:
-
-```powershell
-code-review-graph build --xpp-base-root "C:\...\PackagesLocalDirectory"
-```
-
-The build:
-1. Walks all `Metadata\<Package>\<Model>\Ax*\*.xml` files
-2. Parses embedded X++ from each metadata XML
-3. Stores the graph in `.code-review-graph\graph.db` (SQLite, excluded from git)
-4. Runs the X++ resolver to link extension → base class references and generate WRAPS edges
-
-**Expected repo layout detected:**
+**Expected repo layout:**
 
 ```
 Metadata\
@@ -124,34 +53,81 @@ Metadata\
       ...
 ```
 
-Check the result:
+Check what was built:
 
-```powershell
-code-review-graph status
+```cmd
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph status
 ```
 
 ---
 
-## 5. Incremental update (after making changes)
+## 2. Wire up the MCP server to your AI tool
 
-After changing, adding, or deleting XML files, run:
+Still from inside your D365 repo, run:
 
-```powershell
-code-review-graph update
+```cmd
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph install
+```
+
+This auto-detects which AI tools you have installed (Claude Code, Copilot, Cursor, Windsurf,
+etc.) and writes the correct MCP configuration for each one.
+
+**Restart your editor/AI tool after running this.**
+
+To target a specific tool only:
+
+```cmd
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph install --platform claude-code
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph install --platform cursor
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph install --platform copilot
+```
+
+---
+
+## 3. Configure the X++ base root
+
+The base root is `PackagesLocalDirectory` from your local D365 install. It lets the graph
+resolve references from your extension code into Microsoft's base classes and tables.
+
+**Auto-detection:** If D365 is installed under the standard path
+(`%LOCALAPPDATA%\Microsoft\Dynamics365\<version>\PackagesLocalDirectory`), the tool finds it
+automatically — no configuration needed.
+
+**To set it explicitly** (pass it on the `build` command as shown in step 1):
+
+```cmd
+... code-review-graph build --xpp-base-root "C:\Users\<you>\AppData\Local\Microsoft\Dynamics365\10.0.2527.78\PackagesLocalDirectory"
+```
+
+**Via environment variable** (useful in CI):
+
+```cmd
+set CRG_XPP_BASE_ROOTS=C:\...\PackagesLocalDirectory
+```
+
+**Multiple roots** (semicolon-separated):
+
+```cmd
+set CRG_XPP_BASE_ROOTS=C:\...\PackagesLocalDirectory;D:\...\AnotherRoot
+```
+
+---
+
+## 4. Incremental update (after making changes)
+
+After changing, adding, or deleting XML files, run from your repo directory:
+
+```cmd
+cd C:\GitRepos\RARnDInitiatives
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph update
 ```
 
 This detects changed files via `git diff HEAD~1`, re-parses only those files, and re-runs
 the X++ resolver. Much faster than a full build.
 
-You can also point at a different base commit:
-
-```powershell
-code-review-graph update --base HEAD~3
-```
-
 ---
 
-## 6. What gets indexed
+## 5. What gets indexed
 
 ### Metadata objects
 
@@ -197,9 +173,9 @@ All recognized `Ax*` folder types are parsed, including:
 
 ---
 
-## 7. Querying the graph
+## 6. Querying the graph
 
-Once built, use these MCP tool patterns inside your AI tool:
+Once built and installed, use these patterns inside your AI tool:
 
 ```
 # All classes that extend SalesTable
@@ -224,56 +200,64 @@ get_impact_radius(node="MyClass.run")
 semantic_search_nodes_tool(query="sales order validation")
 ```
 
-Or from the CLI for quick checks:
+Or from the command line:
 
-```powershell
-code-review-graph status          # graph stats
-code-review-graph detect-changes  # risk-scored analysis of uncommitted changes
-code-review-graph visualize       # open interactive D3 graph in browser
+```cmd
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph status
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph detect-changes
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph visualize
 ```
 
 ---
 
-## 8. Typical daily workflow
+## 7. Typical daily workflow
 
-```powershell
-# Morning: make sure the graph is current
-code-review-graph update
+```cmd
+rem Morning: update the graph with any overnight changes
+cd C:\GitRepos\RARnDInitiatives
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph update
 
-# While coding: let the AI tool query the graph automatically via MCP
-# (Claude Code, Copilot, etc. call the MCP tools on their own)
+rem While coding: AI tool queries the graph automatically via MCP
 
-# Before committing: review your changes
-code-review-graph detect-changes
-# or inside the AI tool:
-# /code-review-graph:review-delta
+rem Before committing: review your changes
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph detect-changes
 ```
 
 ---
 
-## 9. Troubleshooting
+## 8. Troubleshooting
+
+**`program not found` when running `code-review-graph`**
+
+The `code-review-graph` command is not on your PATH. Always use the full `uv run --project` form
+shown in this guide:
+
+```cmd
+C:\Users\<you>\.local\bin\uv.exe run --project "C:\GitRepos\code-review-graph" code-review-graph <command>
+```
 
 **Graph not found / MCP server fails to start**
 
-Make sure you ran `code-review-graph build` at least once from the repo root. The database is
-stored at `.code-review-graph\graph.db` relative to the repo root.
+Make sure you ran `build` at least once from the repo root. The database is stored at
+`.code-review-graph\graph.db` relative to the repo root. Also confirm the `install` step
+completed and you restarted your AI tool.
 
 **X++ XML files not being parsed**
 
 The parser only recognises files whose path contains `Metadata` or `PackagesLocalDirectory`
 and whose immediate parent folder matches a known `Ax*` pattern. Verify your directory
-structure matches the expected layout shown in section 4.
+structure matches the expected layout shown in section 1.
 
 **Base root not detected automatically**
 
-Check that D365 is installed under `%LOCALAPPDATA%\Microsoft\Dynamics365\`. If it's installed
+Check that D365 is installed under `%LOCALAPPDATA%\Microsoft\Dynamics365\`. If it is installed
 elsewhere, pass `--xpp-base-root` explicitly or set `CRG_XPP_BASE_ROOTS`.
 
-**Slow first build on large repos**
+**Slow first build**
 
 The base index walk over `PackagesLocalDirectory` (typically 350k+ files) takes 30–90 seconds
-on first run. The index is cached in memory for the process lifetime. Subsequent resolver
-runs in the same session are fast.
+on first run. The index is cached for the process lifetime. Subsequent resolver runs in the
+same session are fast.
 
 **Windows file lock errors during teardown**
 
@@ -287,4 +271,4 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the workaround.
 - [USAGE.md](USAGE.md) — general usage guide
 - [COMMANDS.md](COMMANDS.md) — full MCP tool and CLI reference
 - [FEATURES.md](FEATURES.md) — all features
-- [docs/XPP-HANDOFF.md](XPP-HANDOFF.md) — implementation notes and development history for the X++ parser
+- [XPP-HANDOFF.md](XPP-HANDOFF.md) — implementation notes and development history for the X++ parser
