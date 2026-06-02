@@ -99,6 +99,7 @@ async def build_or_update_graph_tool(
     base: str = "HEAD~1",
     postprocess: str = "full",
     recurse_submodules: Optional[bool] = None,
+    xpp_base_root: Optional[str] = None,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -121,6 +122,8 @@ async def build_or_update_graph_tool(
                      or "none" (skip all post-processing). Use "minimal" for faster builds.
         recurse_submodules: If True, include files from git submodules.
             When None (default), falls back to CRG_RECURSE_SUBMODULES env var.
+        xpp_base_root: Optional D365 PackagesLocalDirectory or metadata root to
+            persist and use during X++ metadata resolution.
     """
     return await asyncio.to_thread(
         build_or_update_graph,
@@ -129,6 +132,7 @@ async def build_or_update_graph_tool(
         base=base,
         postprocess=postprocess,
         recurse_submodules=recurse_submodules,
+        xpp_base_root=xpp_base_root,
     )
 
 
@@ -229,6 +233,10 @@ def query_graph_tool(
     - children_of: Find nodes contained in a file or class
     - tests_for: Find tests for the target
     - inheritors_of: Find classes inheriting from the target
+    - extensions_of: Find X++ metadata extensions of the target
+    - wrapped_by: Find X++ Chain of Command wrappers for the target method
+    - handlers_for: Find X++ event handlers for the target
+    - accesses_of: Find X++ functions that access the target artifact
     - file_summary: Get all nodes in a file
 
     Args:

@@ -455,6 +455,11 @@ def main() -> None:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    build_cmd.add_argument(
+        "--xpp-base-root",
+        default=None,
+        help="Persist and use a D365 metadata root (for example PackagesLocalDirectory)",
+    )
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -492,6 +497,11 @@ def main() -> None:
         "--data-dir",
         default=None,
         help="External directory to store graph database (useful for network shares)"
+    )
+    update_cmd.add_argument(
+        "--xpp-base-root",
+        default=None,
+        help="Persist and use a D365 metadata root (for example PackagesLocalDirectory)",
     )
 
     # postprocess
@@ -988,6 +998,7 @@ def main() -> None:
                 full_rebuild=True,
                 repo_root=str(repo_root),
                 postprocess=pp,
+                xpp_base_root=args.xpp_base_root,
             )
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
@@ -1009,6 +1020,7 @@ def main() -> None:
                 repo_root=str(repo_root),
                 base=args.base,
                 postprocess=pp,
+                xpp_base_root=args.xpp_base_root,
             )
             updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)

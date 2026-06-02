@@ -136,6 +136,7 @@ class TestBuildUpdateCommands:
             full_rebuild=True,
             repo_root="repo-root",
             postprocess="none",
+            xpp_base_root=None,
         )
         mock_postprocess.assert_not_called()
 
@@ -173,6 +174,7 @@ class TestBuildUpdateCommands:
             repo_root="repo-root",
             base="HEAD~1",
             postprocess="minimal",
+            xpp_base_root=None,
         )
         mock_postprocess.assert_not_called()
 

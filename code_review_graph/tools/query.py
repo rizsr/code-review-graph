@@ -28,6 +28,10 @@ _QUERY_PATTERNS = {
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
+    "extensions_of": "Find X++ metadata extensions of an artifact",
+    "wrapped_by": "Find Chain of Command wrapper methods for a target method",
+    "handlers_for": "Find X++ event handlers for a target artifact",
+    "accesses_of": "Find functions or artifacts that access a target data object",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -203,7 +207,14 @@ def query_graph(
             if not node:
                 # Search by name
                 candidates = store.search_nodes(target, limit=5)
-                if len(candidates) == 1:
+                exact = [
+                    cand for cand in candidates
+                    if cand.name == target or cand.qualified_name == target
+                ]
+                if len(exact) == 1:
+                    node = exact[0]
+                    target = node.qualified_name
+                elif len(candidates) == 1:
                     node = candidates[0]
                     target = node.qualified_name
                 elif len(candidates) > 1:
@@ -324,6 +335,60 @@ def query_graph(
                         if child:
                             results.append(node_to_dict(child))
                         edges_out.append(edge_to_dict(e))
+
+        elif pattern == "extensions_of":
+            lookup = qn if node else target
+            for e in store.get_edges_by_target(lookup):
+                if e.kind == "EXTENDS":
+                    ext = store.get_node(e.source_qualified)
+                    if ext:
+                        results.append(node_to_dict(ext))
+                    edges_out.append(edge_to_dict(e))
+            if not results and node:
+                for e in store.search_edges_by_target_name(node.name, kind="EXTENDS"):
+                    ext = store.get_node(e.source_qualified)
+                    if ext:
+                        results.append(node_to_dict(ext))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "wrapped_by":
+            lookup = qn if node else target
+            for e in store.get_edges_by_target(lookup):
+                if e.kind == "WRAPS":
+                    wrapper = store.get_node(e.source_qualified)
+                    if wrapper:
+                        results.append(node_to_dict(wrapper))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "handlers_for":
+            lookup = qn if node else target
+            for e in store.get_edges_by_target(lookup):
+                if e.kind == "HANDLES":
+                    handler = store.get_node(e.source_qualified)
+                    if handler:
+                        results.append(node_to_dict(handler))
+                    edges_out.append(edge_to_dict(e))
+            if not results and node:
+                for e in store.search_edges_by_target_name(node.name, kind="HANDLES"):
+                    handler = store.get_node(e.source_qualified)
+                    if handler:
+                        results.append(node_to_dict(handler))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "accesses_of":
+            lookup = qn if node else target
+            for e in store.get_edges_by_target(lookup):
+                if e.kind == "ACCESSES":
+                    accessor = store.get_node(e.source_qualified)
+                    if accessor:
+                        results.append(node_to_dict(accessor))
+                    edges_out.append(edge_to_dict(e))
+            if not results and node:
+                for e in store.search_edges_by_target_name(node.name, kind="ACCESSES"):
+                    accessor = store.get_node(e.source_qualified)
+                    if accessor:
+                        results.append(node_to_dict(accessor))
+                    edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
             graph_paths = _resolve_graph_file_paths(store, root, [target])

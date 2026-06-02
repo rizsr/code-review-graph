@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 from .graph import GraphStore
 from .parser import CodeParser
+from .xpp_config import get_xpp_base_roots
 
 _MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
 
@@ -91,6 +92,16 @@ def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
         return resolve_temporal_calls(store)
     except Exception as exc:  # noqa: BLE001 - best-effort post-pass
         logger.warning("Temporal resolver failed: %s", exc)
+        return None
+
+
+def _run_xpp_resolver(store: GraphStore, base_roots: list[str] | None = None) -> Optional[dict]:
+    """Run the X++ metadata resolver, swallowing failures."""
+    try:
+        from .xpp_resolver import resolve_xpp_metadata
+        return resolve_xpp_metadata(store, base_roots=base_roots)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("X++ resolver failed: %s", exc)
         return None
 
 # Default ignore patterns (in addition to .gitignore).
@@ -797,7 +808,7 @@ def find_dependents(
 
 
 def _parse_single_file(
-    args: tuple[str, str],
+    abs_path_str: str,
 ) -> tuple[str, list, list, str | None, str]:
     """Parse one file in a worker process.
 
@@ -805,22 +816,22 @@ def _parse_single_file(
     Must be a module-level function so ``ProcessPoolExecutor`` can
     serialise it across processes.
     """
-    rel_path, repo_root_str = args
-    abs_path = Path(repo_root_str) / rel_path
+    abs_path = Path(abs_path_str)
     try:
         raw = abs_path.read_bytes()
         fhash = hashlib.sha256(raw).hexdigest()
         parser = CodeParser()
         nodes, edges = parser.parse_bytes(abs_path, raw)
-        return (rel_path, nodes, edges, None, fhash)
+        return (str(abs_path), nodes, edges, None, fhash)
     except Exception as e:
-        return (rel_path, [], [], str(e), "")
+        return (str(abs_path), [], [], str(e), "")
 
 
 def full_build(
     repo_root: Path,
     store: GraphStore,
     recurse_submodules: bool | None = None,
+    xpp_base_roots: list[str] | None = None,
 ) -> dict:
     """Full rebuild of the entire graph.
 
@@ -832,10 +843,11 @@ def full_build(
     """
     parser = CodeParser()
     files = collect_all_files(repo_root, recurse_submodules)
+    abs_files = [str((repo_root / rel).resolve()) for rel in files]
 
     # Purge stale data from files no longer on disk
     existing_files = set(store.get_all_files())
-    current_abs = {str(repo_root / f) for f in files}
+    current_abs = set(abs_files)
     stale_files = existing_files - current_abs
     for stale in stale_files:
         store.remove_file_data(stale)
@@ -854,7 +866,7 @@ def full_build(
     if use_serial or file_count < 8:
         # Serial fallback (for debugging or tiny repos)
         for i, rel_path in enumerate(files, 1):
-            full_path = repo_root / rel_path
+            full_path = Path(abs_files[i - 1])
             try:
                 source = full_path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
@@ -863,10 +875,10 @@ def full_build(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
             except (OSError, PermissionError) as e:
-                errors.append({"file": rel_path, "error": str(e)})
+                errors.append({"file": str(full_path), "error": str(e)})
             except Exception as e:
-                logger.warning("Error parsing %s: %s", rel_path, e)
-                errors.append({"file": rel_path, "error": str(e)})
+                logger.warning("Error parsing %s: %s", full_path, e)
+                errors.append({"file": str(full_path), "error": str(e)})
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
@@ -874,19 +886,18 @@ def full_build(
         # Executor kind auto-selected: process on Linux/macOS/Windows-TTY,
         # thread on Windows-MCP-stdio to avoid pipe-handle inheritance
         # deadlock (issues #46, #136). Override via CRG_PARSE_EXECUTOR env.
-        args_list = [(rel_path, str(repo_root)) for rel_path in files]
+        args_list = abs_files
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
-            for i, (rel_path, nodes, edges, error, fhash) in enumerate(
+            for i, (abs_path_str, nodes, edges, error, fhash) in enumerate(
                 executor.map(_parse_single_file, args_list, chunksize=20),
                 1,
             ):
                 if error:
-                    logger.warning("Error parsing %s: %s", rel_path, error)
-                    errors.append({"file": rel_path, "error": error})
+                    logger.warning("Error parsing %s: %s", abs_path_str, error)
+                    errors.append({"file": abs_path_str, "error": error})
                     continue
-                full_path = repo_root / rel_path
                 store.store_file_nodes_edges(
-                    str(full_path),
+                    abs_path_str,
                     nodes,
                     edges,
                     fhash,
@@ -904,6 +915,7 @@ def full_build(
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
+    xpp_stats = _run_xpp_resolver(store, xpp_base_roots or get_xpp_base_roots())
 
     return {
         "files_parsed": len(files),
@@ -913,6 +925,7 @@ def full_build(
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
+        "xpp_resolution": xpp_stats,
     }
 
 
@@ -921,6 +934,7 @@ def incremental_update(
     store: GraphStore,
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
+    xpp_base_roots: list[str] | None = None,
 ) -> dict:
     """Incremental update: re-parse changed + dependent files only."""
     parser = CodeParser()
@@ -1006,19 +1020,19 @@ def incremental_update(
                 errors.append({"file": rel_path, "error": str(e)})
     else:
         # See full-build comment above for executor kind rationale.
-        args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
+        args_list = [str((repo_root / rel_path).resolve()) for rel_path in to_parse]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
-            for rel_path, nodes, edges, error, fhash in executor.map(
+            for abs_path_str, nodes, edges, error, fhash in executor.map(
                 _parse_single_file,
                 args_list,
                 chunksize=20,
             ):
                 if error:
-                    logger.warning("Error parsing %s: %s", rel_path, error)
-                    errors.append({"file": rel_path, "error": error})
+                    logger.warning("Error parsing %s: %s", abs_path_str, error)
+                    errors.append({"file": abs_path_str, "error": error})
                     continue
                 store.store_file_nodes_edges(
-                    str(repo_root / rel_path),
+                    abs_path_str,
                     nodes,
                     edges,
                     fhash,
@@ -1042,6 +1056,11 @@ def incremental_update(
     spring_changed = any(rp.endswith(".java") for rp in all_files)
     spring_stats = _run_spring_resolver(store) if spring_changed else None
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
+    xpp_changed = any(rp.endswith(".xml") for rp in all_files)
+    xpp_stats = (
+        _run_xpp_resolver(store, xpp_base_roots or get_xpp_base_roots())
+        if xpp_changed else None
+    )
 
     return {
         "files_updated": len(all_files),
@@ -1053,6 +1072,7 @@ def incremental_update(
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
+        "xpp_resolution": xpp_stats,
     }
 
 

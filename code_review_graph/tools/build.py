@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from ..incremental import full_build, incremental_update
+from ..xpp_config import get_xpp_base_roots, set_xpp_base_roots
 from ._common import _get_store
 
 logger = logging.getLogger(__name__)
@@ -364,6 +365,7 @@ def build_or_update_graph(
     base: str = "HEAD~1",
     postprocess: str = "full",
     recurse_submodules: bool | None = None,
+    xpp_base_root: str | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -380,14 +382,23 @@ def build_or_update_graph(
             via ``git ls-files --recurse-submodules``. When None
             (default), falls back to the CRG_RECURSE_SUBMODULES
             environment variable. Default: disabled.
+        xpp_base_root: Optional D365 base metadata root to persist and use
+            during X++ metadata resolution.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors.
     """
     store, root = _get_store(repo_root)
+    xpp_base_roots = (
+        set_xpp_base_roots([xpp_base_root])
+        if xpp_base_root
+        else get_xpp_base_roots()
+    )
     try:
         if full_rebuild:
-            result = full_build(root, store, recurse_submodules)
+            result = full_build(
+                root, store, recurse_submodules, xpp_base_roots=xpp_base_roots,
+            )
             build_result = {
                 "status": "ok",
                 "build_type": "full",
@@ -399,7 +410,9 @@ def build_or_update_graph(
                 **result,
             }
         else:
-            result = incremental_update(root, store, base=base)
+            result = incremental_update(
+                root, store, base=base, xpp_base_roots=xpp_base_roots,
+            )
             if result["files_updated"] == 0:
                 return {
                     "status": "ok",

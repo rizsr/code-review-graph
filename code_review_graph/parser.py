@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -42,6 +43,65 @@ _SQL_KEYWORDS: frozenset[str] = frozenset({
 })
 
 logger = logging.getLogger(__name__)
+
+_XPP_METADATA_ROOT_MARKERS = {"Metadata", "PackagesLocalDirectory"}
+_XPP_METADATA_OBJECT_KINDS: dict[str, str] = {
+    "AxClass": "Class",
+    "AxTable": "Class",
+    "AxTableExtension": "Class",
+    "AxForm": "Class",
+    "AxFormExtension": "Class",
+    "AxMap": "Class",
+    "AxMapExtension": "Class",
+    "AxQuery": "Class",
+    "AxQuerySimpleExtension": "Class",
+    "AxView": "Class",
+    "AxViewExtension": "Class",
+    "AxDataEntityView": "Class",
+    "AxDataEntityViewExtension": "Class",
+    "AxEnum": "Type",
+    "AxEnumExtension": "Type",
+    "AxEdt": "Type",
+    "AxEdtExtension": "Type",
+    "AxEventSubscription": "Class",
+}
+_XPP_KEYWORDS = {
+    "if", "for", "while", "switch", "catch", "throw", "return", "new", "ttsbegin",
+    "ttscommit", "ttsabort", "select", "insert_recordset", "update_recordset",
+    "delete_from", "exists", "notexists", "join", "where", "and", "or", "do",
+    "case", "break", "continue", "next", "classstr", "tablestr", "formstr",
+    "fieldstr", "methodstr", "enumstr", "identifierstr", "querystr",
+    "mapstr", "extendedtypestr",
+}
+_XPP_DECL_RE = re.compile(
+    r"(?P<attrs>(?:\s*\[[^\]]+\]\s*)*)"
+    r"(?P<mods>(?:(?:public|protected|private|internal|final|abstract)\s+)*)"
+    r"class\s+(?P<name>\w+)(?:\s+extends\s+(?P<base>\w+))?",
+    re.IGNORECASE | re.MULTILINE,
+)
+_XPP_METHOD_RE = re.compile(
+    r"(?P<attrs>(?:\s*\[[^\]]+\]\s*)*)"
+    r"(?P<mods>(?:(?:public|protected|private|internal|static|final|abstract|display|server|client)\s+)*)"
+    r"(?P<ret>[A-Za-z_][\w<>\[\]]*)?\s*"
+    r"(?P<name>[A-Za-z_]\w*)\s*\((?P<params>[^)]*)\)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_XPP_EXTENSION_OF_RE = re.compile(
+    r"ExtensionOf\(\s*(?P<kind>\w+)Str\(\s*(?P<name>\w+)\s*\)\s*\)",
+    re.IGNORECASE,
+)
+_XPP_COMPILETIME_RE = re.compile(
+    r"\b(?P<kind>class|table|form|field|method|enum|identifier|query|map|extendedType)Str"
+    r"\(\s*(?P<args>[^)]*?)\s*\)",
+    re.IGNORECASE,
+)
+_XPP_STATIC_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)::([A-Za-z_]\w*)\s*\(")
+_XPP_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_XPP_SELECT_RE = re.compile(
+    r"\b(?:while\s+select|select|insert_recordset|update_recordset|delete_from)\s+"
+    r"(?:[A-Za-z_]+\s+)*([A-Za-z_]\w*)",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Data models for extracted entities
@@ -812,6 +872,8 @@ class CodeParser:
         has no suffix at all.  See issue #237.
         """
         suffix = path.suffix.lower()
+        if suffix == ".xml" and self._is_xpp_metadata_path(path):
+            return "xpp-metadata"
         lang = EXTENSION_TO_LANGUAGE.get(suffix)
         if lang is not None:
             return lang
@@ -903,6 +965,9 @@ class CodeParser:
         if not language:
             return [], []
 
+        if language == "xpp-metadata":
+            return self._parse_xpp_metadata(path, source)
+
         # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
         if language == "vue":
             return self._parse_vue(path, source)
@@ -993,6 +1058,319 @@ class CodeParser:
                     ))
 
         return nodes, edges
+
+    @staticmethod
+    def compute_content_hash(path: Path) -> str:
+        """Compute a stable hash for a file on disk."""
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return ""
+
+    @staticmethod
+    def _is_xpp_metadata_path(path: Path) -> bool:
+        if path.suffix.lower() != ".xml":
+            return False
+        if path.parent.name not in _XPP_METADATA_OBJECT_KINDS:
+            return False
+        return any(parent.name in _XPP_METADATA_ROOT_MARKERS for parent in path.parents)
+
+    def _parse_xpp_metadata(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a D365 metadata XML file with embedded X++ code."""
+        text = source.decode("utf-8", errors="replace")
+        file_path_str = str(path)
+        test_file = _is_test_file(file_path_str)
+        line_end = text.count("\n") + 1
+        object_type = path.parent.name
+        artifact_kind = _XPP_METADATA_OBJECT_KINDS.get(object_type, "Class")
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            return [], []
+
+        artifact_name = (root.findtext("./Name") or path.stem).strip()
+        package_name, model_name = self._extract_xpp_package_model(path)
+        artifact_qn = self._qualify(artifact_name, file_path_str, None)
+        file_extra = {
+            "xpp_object_type": object_type,
+            "xpp_package": package_name,
+            "xpp_model": model_name,
+        }
+        nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=line_end,
+            language="xpp-metadata",
+            is_test=test_file,
+            extra=file_extra,
+        )]
+        artifact_extra = {
+            "xpp_object_type": object_type,
+            "xpp_package": package_name,
+            "xpp_model": model_name,
+        }
+        nodes.append(NodeInfo(
+            kind=artifact_kind,
+            name=artifact_name,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=line_end,
+            language="xpp-metadata",
+            extra=artifact_extra,
+        ))
+        edges: list[EdgeInfo] = [EdgeInfo(
+            kind="CONTAINS",
+            source=file_path_str,
+            target=artifact_qn,
+            file_path=file_path_str,
+            line=1,
+        )]
+
+        declaration = root.findtext("./SourceCode/Declaration") or ""
+        if declaration.strip():
+            self._extract_xpp_declaration(
+                declaration, text, file_path_str, artifact_name, nodes, edges,
+            )
+        method_nodes: list[NodeInfo] = []
+        for method_el in root.findall("./SourceCode/Methods/Method"):
+            method_name = (method_el.findtext("./Name") or "").strip()
+            method_source = method_el.findtext("./Source") or ""
+            if not method_name or not method_source.strip():
+                continue
+            method_node = self._extract_xpp_method(
+                method_name, method_source, text, file_path_str, artifact_name, edges,
+                artifact_extra,
+            )
+            if method_node:
+                method_nodes.append(method_node)
+        nodes.extend(method_nodes)
+
+        for method_node in method_nodes:
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=artifact_qn,
+                target=self._qualify(method_node.name, file_path_str, artifact_name),
+                file_path=file_path_str,
+                line=method_node.line_start,
+            ))
+
+        self._extract_xpp_metadata_references(root, artifact_qn, file_path_str, edges)
+        return nodes, edges
+
+    @staticmethod
+    def _extract_xpp_package_model(path: Path) -> tuple[str, str]:
+        parts = list(path.parts)
+        for idx, part in enumerate(parts):
+            if part == "Metadata" and idx + 2 < len(parts):
+                return parts[idx + 1], parts[idx + 2]
+            if part == "PackagesLocalDirectory" and idx + 2 < len(parts):
+                return parts[idx + 1], parts[idx + 2]
+        return "", ""
+
+    def _extract_xpp_declaration(
+        self,
+        declaration: str,
+        xml_text: str,
+        file_path: str,
+        artifact_name: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        artifact_qn = self._qualify(artifact_name, file_path, None)
+        match = _XPP_DECL_RE.search(declaration)
+        if not match:
+            self._extract_xpp_compile_time_references(
+                declaration, artifact_qn, file_path, 1, edges,
+            )
+            return
+        base_name = match.group("base")
+        attrs = match.group("attrs") or ""
+        artifact_node = nodes[-1]
+        if base_name:
+            edges.append(EdgeInfo(
+                kind="INHERITS",
+                source=artifact_qn,
+                target=base_name,
+                file_path=file_path,
+                line=self._find_text_line(xml_text, declaration),
+            ))
+        ext = _XPP_EXTENSION_OF_RE.search(attrs)
+        if ext:
+            target_name = ext.group("name")
+            artifact_node.extra["xpp_extension_target"] = target_name
+            artifact_node.extra["xpp_extension_kind"] = ext.group("kind").lower()
+            edges.append(EdgeInfo(
+                kind="EXTENDS",
+                source=artifact_qn,
+                target=target_name,
+                file_path=file_path,
+                line=self._find_text_line(xml_text, declaration),
+                extra={"xpp_ref_kind": ext.group("kind").lower()},
+            ))
+        self._extract_xpp_compile_time_references(
+            declaration,
+            artifact_qn,
+            file_path,
+            self._find_text_line(xml_text, declaration),
+            edges,
+        )
+
+    def _extract_xpp_method(
+        self,
+        method_name: str,
+        method_source: str,
+        xml_text: str,
+        file_path: str,
+        artifact_name: str,
+        edges: list[EdgeInfo],
+        artifact_extra: dict,
+    ) -> Optional[NodeInfo]:
+        match = _XPP_METHOD_RE.search(method_source)
+        if not match:
+            return None
+        line_start = self._find_text_line(xml_text, method_source)
+        line_end = line_start + method_source.count("\n")
+        method_qn = self._qualify(method_name, file_path, artifact_name)
+        node_extra: dict = {}
+        if artifact_extra.get("xpp_extension_target"):
+            node_extra["xpp_extension_target"] = artifact_extra["xpp_extension_target"]
+            node_extra["xpp_extension_kind"] = artifact_extra.get("xpp_extension_kind", "")
+        if re.search(rf"\bnext\s+{re.escape(method_name)}\s*\(", method_source):
+            node_extra["xpp_calls_next"] = True
+
+        for static_call in _XPP_STATIC_CALL_RE.finditer(method_source):
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=method_qn,
+                target=f"{static_call.group(1)}.{static_call.group(2)}",
+                file_path=file_path,
+                line=line_start + method_source[: static_call.start()].count("\n"),
+            ))
+        for call in _XPP_CALL_RE.finditer(method_source):
+            target = call.group(1)
+            if target.lower() in _XPP_KEYWORDS or target == method_name:
+                continue
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=method_qn,
+                target=target,
+                file_path=file_path,
+                line=line_start + method_source[: call.start()].count("\n"),
+            ))
+        self._extract_xpp_compile_time_references(
+            method_source, method_qn, file_path, line_start, edges,
+        )
+        for access in _XPP_SELECT_RE.finditer(method_source):
+            target = access.group(1)
+            if target.lower() in _XPP_KEYWORDS:
+                continue
+            edges.append(EdgeInfo(
+                kind="ACCESSES",
+                source=method_qn,
+                target=target,
+                file_path=file_path,
+                line=line_start + method_source[: access.start()].count("\n"),
+                extra={"xpp_ref_kind": "table"},
+            ))
+        return NodeInfo(
+            kind="Function",
+            name=method_name,
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            language="xpp",
+            parent_name=artifact_name,
+            params=(match.group("params") or "").strip(),
+            return_type=(match.group("ret") or "").strip() or None,
+            extra=node_extra,
+        )
+
+    def _extract_xpp_compile_time_references(
+        self,
+        source_text: str,
+        source_qn: str,
+        file_path: str,
+        base_line: int,
+        edges: list[EdgeInfo],
+    ) -> None:
+        for ref in _XPP_COMPILETIME_RE.finditer(source_text):
+            kind = ref.group("kind").lower()
+            args = [part.strip() for part in ref.group("args").split(",") if part.strip()]
+            if not args:
+                continue
+            target = args[0]
+            if kind == "method" and len(args) >= 2:
+                target = f"{args[0]}.{args[1]}"
+            elif kind == "field" and len(args) >= 2:
+                target = f"{args[0]}.{args[1]}"
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=source_qn,
+                target=target,
+                file_path=file_path,
+                line=base_line + source_text[: ref.start()].count("\n"),
+                extra={"xpp_ref_kind": kind},
+            ))
+
+    def _extract_xpp_metadata_references(
+        self,
+        root: ET.Element,
+        artifact_qn: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        for tag_name, kind in (
+            ("ExtendedDataType", "edt"),
+            ("EnumType", "enum"),
+            ("FormRef", "form"),
+            ("ListPageRef", "form"),
+            ("ViewMetadata", "view"),
+        ):
+            for element in root.findall(f".//{tag_name}"):
+                value = (element.text or "").strip()
+                if value:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=artifact_qn,
+                        target=value,
+                        file_path=file_path,
+                        extra={"xpp_ref_kind": kind},
+                    ))
+        for data_field in root.findall(".//DataField"):
+            value = (data_field.text or "").strip()
+            if value:
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=artifact_qn,
+                    target=value,
+                    file_path=file_path,
+                    extra={"xpp_ref_kind": "field"},
+                ))
+        if root.tag.endswith("AxEventSubscription"):
+            for event_handler in root.iter():
+                local_name = event_handler.tag.rsplit("}", 1)[-1]
+                if local_name.lower().endswith("handler") or local_name.lower().endswith("method"):
+                    value = (event_handler.text or "").strip()
+                    if value:
+                        edges.append(EdgeInfo(
+                            kind="HANDLES",
+                            source=artifact_qn,
+                            target=value,
+                            file_path=file_path,
+                        ))
+
+    @staticmethod
+    def _find_text_line(xml_text: str, snippet: str) -> int:
+        idx = xml_text.find(snippet.strip())
+        if idx == -1:
+            idx = xml_text.find(snippet)
+        if idx == -1:
+            return 1
+        return xml_text[:idx].count("\n") + 1
 
     def _parse_vue(
         self, path: Path, source: bytes,
