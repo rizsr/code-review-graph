@@ -57,7 +57,7 @@ _XPP_ARTIFACT_FOLDERS = {
     "menuitemoutput": ["AxMenuItem"],
     "menuitemaction": ["AxMenuItem"],
     "configurationkey": ["AxConfigurationKey"],
-    "licensecodesstr": ["AxLicenseCode"],
+    "licensecodestr": ["AxLicenseCode"],
     "tile": ["AxTile"],
     "page": ["AxPage"],
     "resource": ["AxResource"],

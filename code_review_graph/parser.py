@@ -144,7 +144,7 @@ _XPP_KEYWORDS = {
     "dataentitystr", "menustr", "menuitemdisplaystr", "menuitemoutputstr",
     "menuitemactionstr", "reportstr", "ssrsreportstr", "securityrolestr",
     "securitydutystr", "securityprivilegestr", "workflowstr", "configurationkeystr",
-    "licensecodesstr", "tilestr", "pagestr", "resourcestr", "varstr",
+    "licensecodestr", "tilestr", "pagestr", "resourcestr", "varstr",
 }
 _XPP_DECL_RE = re.compile(
     r"(?P<attrs>(?:\s*\[[^\]]+\]\s*)*)"
@@ -1521,15 +1521,31 @@ class CodeParser:
         )
         for access in _XPP_SELECT_RE.finditer(method_source):
             table = access.group("table")
-            if table.lower() in _XPP_KEYWORDS or table.lower() in _XPP_SELECT_MODIFIERS:
+            tl = table.lower()
+            if tl in _XPP_KEYWORDS or tl in _XPP_SELECT_MODIFIERS or tl in _XPP_AGG_FN_NAMES:
                 continue
-            # Extract which modifiers were present.
             mods_raw = (access.group("mods") or "").lower().split()
+            # When mods contains "from": `select field from Table` — captured token is a
+            # field name.  Skip; _XPP_SELECT_FROM_RE handles the real table separately.
+            if "from" in mods_raw:
+                continue
+            # When the token was captured via a comma lookahead (field list before FROM),
+            # check whether a FROM keyword follows before the statement ends.  Only for
+            # plain select/while_select — DML ops (insert_recordset etc.) may legitimately
+            # have FROM in a sub-select and the captured table name is still correct.
+            op = access.group("op").lower().replace(" ", "_")
+            if op in ("select", "while_select"):
+                after_table = method_source[access.end():].lstrip()
+                if after_table.startswith(","):
+                    rest = method_source[access.end():]
+                    term_m = re.search(r"[;\n]", rest)
+                    rest_until_term = rest[: term_m.start()] if term_m else rest
+                    if re.search(r"\bfrom\b", rest_until_term, re.IGNORECASE):
+                        continue
             modifiers = [m for m in mods_raw if m in _XPP_SELECT_MODIFIERS]
             edge_extra: dict = {"xpp_ref_kind": "table"}
             if modifiers:
                 edge_extra["xpp_select_modifiers"] = modifiers
-            op = access.group("op").lower().replace(" ", "_")
             if op != "select" and op != "while_select":
                 edge_extra["xpp_select_op"] = op
             edges.append(EdgeInfo(

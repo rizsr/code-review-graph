@@ -1397,6 +1397,24 @@ public void run()
         assert table_edges
         assert "xpp_select_modifiers" not in table_edges[0].extra
 
+    def test_select_field_from_no_false_positive_table_edge(self, tmp_path):
+        """select Field1, Field2 from Table must NOT emit Field1 as ACCESSES(table)."""
+        xml_path = self._make_class_xml(tmp_path, "TestNoFalsePos", """
+public void run()
+{
+    select SalesId, CustAccount from SalesTable;
+}
+""")
+        nodes, edges = self.parser.parse_file(xml_path)
+        # Field names must not appear as table-kind ACCESSES edges.
+        table_targets = {
+            e.target for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "table"
+        }
+        assert "SalesId" not in table_targets, "Field name falsely emitted as table"
+        assert "CustAccount" not in table_targets, "Field name falsely emitted as table"
+        assert "SalesTable" in table_targets, "Real table should still be captured"
+
     def test_aggregate_sum_captured(self, tmp_path):
         """sum(field) emits ACCESSES(aggregate) with xpp_aggregate_fn=sum."""
         xml_path = self._make_class_xml(tmp_path, "TestAggSum", """
