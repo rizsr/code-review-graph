@@ -1493,3 +1493,192 @@ public void run()
             if e.kind == "ACCESSES" and e.extra.get("xpp_select_op") == "insert_recordset"
         ]
         assert dml_edges, "Expected insert_recordset ACCESSES edge"
+
+
+class TestXppEventSupport:
+    """PreEventHandler/PostEventHandler distinction and attribute-based event handlers."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _write_xml(self, tmp_path, folder: str, name: str, body: str):
+        xml_path = tmp_path / "Metadata" / "Pkg" / "Pkg" / folder / f"{name}.xml"
+        xml_path.parent.mkdir(parents=True, exist_ok=True)
+        xml_path.write_text(body, encoding="utf-8")
+        return xml_path
+
+    def test_axeventsubscription_pre_event_type(self, tmp_path):
+        """AxEventSubscription with EventType=Pre sets xpp_event_type=pre on HANDLES edge."""
+        xml_path = self._write_xml(
+            tmp_path, "AxEventSubscription", "OnInsertPre",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEventSubscription>
+  <Name>OnInsertPre</Name>
+  <Publisher>SalesTable</Publisher>
+  <PublisherMethod>onInserted</PublisherMethod>
+  <EventType>Pre</EventType>
+  <EventHandler>MyHandler</EventHandler>
+</AxEventSubscription>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        handles_edges = [e for e in edges if e.kind == "HANDLES"]
+        assert handles_edges
+        assert handles_edges[0].extra.get("xpp_event_type") == "pre"
+        assert handles_edges[0].target == "SalesTable.onInserted"
+
+    def test_axeventsubscription_post_event_type(self, tmp_path):
+        """AxEventSubscription with EventType=Post sets xpp_event_type=post."""
+        xml_path = self._write_xml(
+            tmp_path, "AxEventSubscription", "OnInsertPost",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEventSubscription>
+  <Name>OnInsertPost</Name>
+  <Publisher>SalesTable</Publisher>
+  <PublisherMethod>onInserted</PublisherMethod>
+  <EventType>Post</EventType>
+  <EventHandler>MyHandler</EventHandler>
+</AxEventSubscription>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        handles_edges = [e for e in edges if e.kind == "HANDLES"]
+        assert handles_edges
+        assert handles_edges[0].extra.get("xpp_event_type") == "post"
+
+    def test_axeventsubscription_delegate_via_publisher_event(self, tmp_path):
+        """PublisherEvent (delegate) is preferred over PublisherMethod; sets xpp_event_kind=delegate."""
+        xml_path = self._write_xml(
+            tmp_path, "AxEventSubscription", "DelegateHandler",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEventSubscription>
+  <Name>DelegateHandler</Name>
+  <Publisher>SalesFormLetter</Publisher>
+  <PublisherEvent>onPrintingDelegate</PublisherEvent>
+  <EventType>Delegate</EventType>
+  <EventHandler>PrintHandler</EventHandler>
+</AxEventSubscription>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        handles_edges = [e for e in edges if e.kind == "HANDLES"]
+        assert handles_edges
+        assert handles_edges[0].extra.get("xpp_event_kind") == "delegate"
+        assert handles_edges[0].target == "SalesFormLetter.onPrintingDelegate"
+
+    def test_attribute_data_event_handler(self, tmp_path):
+        """[DataEventHandler(classStr(SalesTable), enumStr(DataEventType, Inserted))]
+        on a method emits a HANDLES edge and sets xpp_event_handler=True on the node."""
+        xml_path = self._write_xml(
+            tmp_path, "AxClass", "SalesTableEventHandler",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>SalesTableEventHandler</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class SalesTableEventHandler
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>onInserted</Name>
+        <Source><![CDATA[
+[DataEventHandler(classStr(SalesTable), enumStr(DataEventType, Inserted))]
+public static void onInserted(Common sender, DataEventArgs e)
+{
+}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        handles_edges = [
+            e for e in edges
+            if e.kind == "HANDLES"
+            and e.extra.get("xpp_event_handler_kind") == "dataeventhandler"
+        ]
+        assert handles_edges, "Expected HANDLES edge from DataEventHandler attribute"
+        assert "SalesTable" in handles_edges[0].target
+        fn_node = next(
+            (n for n in nodes if n.kind == "Function" and n.name == "onInserted"), None
+        )
+        assert fn_node is not None
+        assert fn_node.extra.get("xpp_event_handler")
+
+    def test_attribute_form_datasource_event_handler(self, tmp_path):
+        """[FormDataSourceEventHandler(...)] emits HANDLES with xpp_event_handler_kind=formdatasourceeventhandler."""
+        xml_path = self._write_xml(
+            tmp_path, "AxClass", "SalesOrderFormHandler",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>SalesOrderFormHandler</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class SalesOrderFormHandler
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>onValidateWrite</Name>
+        <Source><![CDATA[
+[FormDataSourceEventHandler(formStr(SalesOrder), formDataSourceStr(SalesOrder, SalesTable), FormDataSourceEventType::ValidateWrite)]
+public static boolean onValidateWrite(FormDataSource sender, FormDataSourceEventArgs e)
+{
+    return true;
+}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        handles_edges = [
+            e for e in edges
+            if e.kind == "HANDLES"
+            and e.extra.get("xpp_event_handler_kind") == "formdatasourceeventhandler"
+        ]
+        assert handles_edges, "Expected HANDLES edge from FormDataSourceEventHandler"
+        assert "SalesOrder" in handles_edges[0].target
+
+    def test_attribute_form_control_event_handler(self, tmp_path):
+        """[FormControlEventHandler(...)] emits HANDLES with xpp_event_handler_kind=formcontroleventhandler."""
+        xml_path = self._write_xml(
+            tmp_path, "AxClass", "SalesFormControlHandler",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>SalesFormControlHandler</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class SalesFormControlHandler
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>onOkClicked</Name>
+        <Source><![CDATA[
+[FormControlEventHandler(formStr(SalesOrder), FormControlStr(SalesOrder, OKButton), FormControlEventType::Clicked)]
+public static void onOkClicked(FormControl sender, FormControlEventArgs e)
+{
+}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        handles_edges = [
+            e for e in edges
+            if e.kind == "HANDLES"
+            and e.extra.get("xpp_event_handler_kind") == "formcontroleventhandler"
+        ]
+        assert handles_edges, "Expected HANDLES edge from FormControlEventHandler"

@@ -230,6 +230,26 @@ _XPP_IMPLEMENTS_RE = re.compile(
     r"\bimplements\s+(?P<impls>[A-Za-z_][\w\s,]*?)(?=\s*[{(\n])",
     re.IGNORECASE | re.MULTILINE,
 )
+# Attribute-based event handlers on methods, e.g.:
+#   [DataEventHandler(classStr(SalesTable), enumStr(DataEventType, Inserted))]
+#   [FormDataSourceEventHandler(formStr(SalesOrder), formDataSourceStr(...), ...::ValidateWrite)]
+#   [FormControlEventHandler(formStr(SalesOrder), FormControlStr(...), ...::Clicked)]
+# Captures: handler_kind, then the full args string for further parsing.
+_XPP_EVENT_HANDLER_ATTR_RE = re.compile(
+    r"\[(?P<kind>DataEventHandler|FormDataSourceEventHandler|FormControlEventHandler"
+    r"|FormDataFieldEventHandler|SysDelegate)\s*\((?P<args>[^()]*(?:\([^()]*\)[^()]*)*)\)",
+    re.IGNORECASE,
+)
+# Extracts first classStr/tableStr/formStr argument from handler args.
+_XPP_HANDLER_TARGET_RE = re.compile(
+    r"(?:classStr|tableStr|formStr)\(\s*(?P<name>\w+)\s*\)",
+    re.IGNORECASE,
+)
+# Extracts event type from enum/method ref like DataEventType::Inserted or ::ValidateWrite.
+_XPP_HANDLER_EVENT_TYPE_RE = re.compile(
+    r"(?:(?P<enum>\w+)::)?(?P<member>\w+)\s*$",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Data models for extracted entities
@@ -1388,6 +1408,37 @@ class CodeParser:
         if re.search(rf"\bnext\s+{re.escape(method_name)}\s*\(", method_source):
             node_extra["xpp_calls_next"] = True
 
+        # Attribute-based event handlers: [DataEventHandler(...)] etc. on this method.
+        attrs_text = match.group("attrs") or ""
+        for attr_match in _XPP_EVENT_HANDLER_ATTR_RE.finditer(attrs_text):
+            handler_kind = attr_match.group("kind")
+            args_str = attr_match.group("args")
+            target_match = _XPP_HANDLER_TARGET_RE.search(args_str)
+            if not target_match:
+                continue
+            target_artifact = target_match.group("name")
+            # Extract event member from last arg segment (after last comma).
+            last_arg = args_str.rsplit(",", 1)[-1].strip()
+            event_type_match = _XPP_HANDLER_EVENT_TYPE_RE.search(last_arg)
+            event_member = (
+                event_type_match.group("member") if event_type_match else ""
+            )
+            edge_target = (
+                f"{target_artifact}.{event_member}" if event_member else target_artifact
+            )
+            edges.append(EdgeInfo(
+                kind="HANDLES",
+                source=method_qn,
+                target=edge_target,
+                file_path=file_path,
+                line=line_start,
+                extra={
+                    "xpp_ref_kind": "event",
+                    "xpp_event_handler_kind": handler_kind.lower(),
+                },
+            ))
+            node_extra["xpp_event_handler"] = True
+
         # Build a local var→type map so obj.method() can be resolved to TypeName.method().
         local_var_types: dict[str, str] = {}
         for vd in _XPP_VAR_DECL_RE.finditer(method_source):
@@ -1716,14 +1767,27 @@ class CodeParser:
         if root.tag.endswith("AxEventSubscription"):
             publisher = (root.findtext("./Publisher") or "").strip()
             publisher_method = (root.findtext("./PublisherMethod") or "").strip()
+            publisher_event = (root.findtext("./PublisherEvent") or "").strip()
             handler_class = (root.findtext("./EventHandler") or "").strip()
-            if publisher and publisher_method:
+            # EventType: Pre / Post / Delegate — map to lowercase token.
+            raw_event_type = (root.findtext("./EventType") or "").strip().lower()
+            event_type = raw_event_type if raw_event_type in {"pre", "post", "delegate"} else None
+            # Prefer PublisherEvent (delegate) over PublisherMethod (method-based event).
+            event_member = publisher_event or publisher_method
+            if publisher and event_member:
+                event_extra: dict = {"xpp_ref_kind": "event"}
+                if event_type:
+                    event_extra["xpp_event_type"] = event_type
+                if publisher_event:
+                    event_extra["xpp_event_kind"] = "delegate"
+                elif publisher_method:
+                    event_extra["xpp_event_kind"] = "method"
                 edges.append(EdgeInfo(
                     kind="HANDLES",
                     source=artifact_qn,
-                    target=f"{publisher}.{publisher_method}",
+                    target=f"{publisher}.{event_member}",
                     file_path=file_path,
-                    extra={"xpp_ref_kind": "event"},
+                    extra=event_extra,
                 ))
             elif publisher:
                 edges.append(EdgeInfo(
