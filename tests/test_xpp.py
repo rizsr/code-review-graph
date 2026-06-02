@@ -674,3 +674,195 @@ public void run()
         call_targets = {e.target for e in edges if e.kind == "CALLS"}
         assert "this.helper" not in call_targets
         assert "super.run" not in call_targets
+
+
+class TestXppFormControlExtraction:
+    """Form control methods and datasource event extraction."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _make_form_xml(self, tmp_path, name: str, body: str) -> "Path":
+        xml_path = (
+            tmp_path / "Metadata" / "Pkg" / "Pkg" / "AxForm" / f"{name}.xml"
+        )
+        xml_path.parent.mkdir(parents=True, exist_ok=True)
+        xml_path.write_text(body, encoding="utf-8")
+        return xml_path
+
+    def test_form_control_method_extracted(self, tmp_path):
+        """Methods inside <Design>/<Controls>/AxFormControl are extracted as Function nodes."""
+        xml_path = self._make_form_xml(
+            tmp_path, "SalesForm",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxForm>
+  <Name>SalesForm</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class SalesForm extends FormRun
+{
+}
+]]></Declaration>
+  </SourceCode>
+  <Design>
+    <Controls>
+      <AxFormControl>
+        <Name>OKButton</Name>
+        <Methods>
+          <Method>
+            <Name>clicked</Name>
+            <Source><![CDATA[
+public void clicked()
+{
+    element.close();
+}
+]]></Source>
+          </Method>
+        </Methods>
+      </AxFormControl>
+    </Controls>
+  </Design>
+</AxForm>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        fn_names = {n.name for n in nodes if n.kind == "Function"}
+        assert "OKButton_clicked" in fn_names
+
+    def test_form_control_event_flagged(self, tmp_path):
+        """Event methods (clicked, modified) are annotated with xpp_control_event=True."""
+        xml_path = self._make_form_xml(
+            tmp_path, "CustForm",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxForm>
+  <Name>CustForm</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class CustForm extends FormRun
+{
+}
+]]></Declaration>
+  </SourceCode>
+  <Design>
+    <Controls>
+      <AxFormControl>
+        <Name>NameField</Name>
+        <Methods>
+          <Method>
+            <Name>modified</Name>
+            <Source><![CDATA[
+public boolean modified()
+{
+    return super.modified();
+}
+]]></Source>
+          </Method>
+        </Methods>
+      </AxFormControl>
+    </Controls>
+  </Design>
+</AxForm>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        event_nodes = [
+            n for n in nodes
+            if n.kind == "Function" and n.extra.get("xpp_control_event")
+        ]
+        assert any(n.name == "NameField_modified" for n in event_nodes)
+
+    def test_form_control_method_metadata(self, tmp_path):
+        """Control method nodes carry xpp_control and xpp_control_method in extra."""
+        xml_path = self._make_form_xml(
+            tmp_path, "VendForm",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxForm>
+  <Name>VendForm</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class VendForm extends FormRun
+{
+}
+]]></Declaration>
+  </SourceCode>
+  <Design>
+    <Controls>
+      <AxFormControl>
+        <Name>SaveBtn</Name>
+        <Methods>
+          <Method>
+            <Name>clicked</Name>
+            <Source><![CDATA[
+public void clicked()
+{
+    this.doSave();
+}
+]]></Source>
+          </Method>
+        </Methods>
+      </AxFormControl>
+    </Controls>
+  </Design>
+</AxForm>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        ctrl_node = next(
+            (n for n in nodes if n.kind == "Function" and n.name == "SaveBtn_clicked"),
+            None,
+        )
+        assert ctrl_node is not None
+        assert ctrl_node.extra.get("xpp_control") == "SaveBtn"
+        assert ctrl_node.extra.get("xpp_control_method") == "clicked"
+
+    def test_datasource_event_flagged(self, tmp_path):
+        """Datasource event methods (init, validateWrite, etc.) are annotated."""
+        xml_path = self._make_form_xml(
+            tmp_path, "ProjForm",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxForm>
+  <Name>ProjForm</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class ProjForm extends FormRun
+{
+}
+]]></Declaration>
+  </SourceCode>
+  <DataSources>
+    <AxFormDataSource>
+      <Name>ProjTable</Name>
+      <Table>ProjTable</Table>
+      <Methods>
+        <Method>
+          <Name>validateWrite</Name>
+          <Source><![CDATA[
+public boolean validateWrite()
+{
+    return super.validateWrite();
+}
+]]></Source>
+        </Method>
+        <Method>
+          <Name>customHelper</Name>
+          <Source><![CDATA[
+public void customHelper()
+{
+}
+]]></Source>
+        </Method>
+      </Methods>
+    </AxFormDataSource>
+  </DataSources>
+</AxForm>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        event_nodes = [n for n in nodes if n.extra.get("xpp_ds_event")]
+        non_event_nodes = [
+            n for n in nodes
+            if n.kind == "Function" and n.name == "customHelper"
+        ]
+        assert any(n.name == "validateWrite" for n in event_nodes)
+        assert non_event_nodes  # customHelper present but NOT flagged as event
+        assert not non_event_nodes[0].extra.get("xpp_ds_event")

@@ -1668,6 +1668,12 @@ class CodeParser:
                 ))
 
         elif object_type in ("AxForm", "AxFormExtension"):
+            # Datasource methods (already handled) — annotate events.
+            _DS_EVENT_NAMES = frozenset({
+                "init", "active", "validatewrite", "validatedelete",
+                "write", "delete", "refresh", "reread", "selectionchanged",
+                "linkactive", "initvalue", "validatefield",
+            })
             for ds_el in root.findall(".//DataSources/AxFormDataSource"):
                 ds_name = (ds_el.findtext("./Name") or "").strip()
                 for method_el in ds_el.findall(".//Methods/Method"):
@@ -1676,17 +1682,66 @@ class CodeParser:
                     if not method_name or not method_source.strip():
                         continue
                     ds_extra = {**artifact_extra, "xpp_datasource": ds_name}
+                    if method_name.lower() in _DS_EVENT_NAMES:
+                        ds_extra = {**ds_extra, "xpp_ds_event": True}
                     method_node = self._extract_xpp_method(
                         method_name, method_source, xml_text, file_path,
                         artifact_name, child_edges, ds_extra,
                     )
                     if method_node:
                         method_node.extra["xpp_datasource"] = ds_name
+                        if ds_extra.get("xpp_ds_event"):
+                            method_node.extra["xpp_ds_event"] = True
                         child_nodes.append(method_node)
                         child_edges.append(EdgeInfo(
                             kind="CONTAINS",
                             source=artifact_qn,
                             target=self._qualify(method_name, file_path, artifact_name),
+                            file_path=file_path,
+                            line=method_node.line_start,
+                        ))
+
+            # Form control methods from <Design>/<Controls>/.../<Methods>.
+            _CONTROL_EVENT_NAMES = frozenset({
+                "clicked", "modified", "lookup", "jumpref", "validate",
+                "init", "run", "close", "enter", "leave",
+                "mousedblclick", "mouseenter", "mouseleave",
+            })
+            for control_el in root.findall(".//Design//Controls//AxFormControl"):
+                control_name = (control_el.findtext("./Name") or "").strip()
+                if not control_name:
+                    continue
+                for method_el in control_el.findall("./Methods/Method"):
+                    method_name = (method_el.findtext("./Name") or "").strip()
+                    method_source = method_el.findtext("./Source") or ""
+                    if not method_name or not method_source.strip():
+                        continue
+                    ctrl_extra: dict = {
+                        **artifact_extra,
+                        "xpp_control": control_name,
+                    }
+                    if method_name.lower() in _CONTROL_EVENT_NAMES:
+                        ctrl_extra["xpp_control_event"] = True
+                    # Qualify with control name to avoid collisions across controls.
+                    qualified_method_name = f"{control_name}_{method_name}"
+                    method_node = self._extract_xpp_method(
+                        qualified_method_name, method_source, xml_text, file_path,
+                        artifact_name, child_edges, ctrl_extra,
+                    )
+                    if method_node:
+                        method_node.extra.update({
+                            "xpp_control": control_name,
+                            "xpp_control_method": method_name,
+                        })
+                        if ctrl_extra.get("xpp_control_event"):
+                            method_node.extra["xpp_control_event"] = True
+                        child_nodes.append(method_node)
+                        child_edges.append(EdgeInfo(
+                            kind="CONTAINS",
+                            source=artifact_qn,
+                            target=self._qualify(
+                                qualified_method_name, file_path, artifact_name,
+                            ),
                             file_path=file_path,
                             line=method_node.line_start,
                         ))
