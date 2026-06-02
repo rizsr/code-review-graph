@@ -496,13 +496,21 @@ All previously identified gaps have been addressed. No known correctness gaps re
 - Added `TestXppIncrementalUpdate` class in `tests/test_incremental.py` (5 new tests).
 - Covers: initial parse, modified file re-parses and replaces stale nodes, deleted file removes nodes/edges, unchanged file is skipped via hash check, rename (delete old + add new) correctly purges old and stores new.
 
+### 4. Select false-positive suppression + typo fix (DONE — `4a271f2`)
+
+- `_XPP_SELECT_RE`: `select Field1, Field2 from Table` no longer emits `Field1` as `ACCESSES(table)`. When the captured token was terminated by a comma and a `from` keyword follows before the statement end, the token is a field name — skipped. Scoped to `select`/`while_select` only so `insert_recordset` destinations are unaffected.
+- `_XPP_AGG_FN_NAMES` check added to `_XPP_SELECT_RE` loop (e.g. bare `sum` after `select sum(...)` no longer emits a spurious table edge).
+- Fixed `licensecodesstr` → `licensecodestr` typo in `_XPP_KEYWORDS` and `_XPP_ARTIFACT_FOLDERS`. The extra `s` meant `licenseCodeStr()` refs were unfiltered as keywords and the resolver never mapped them to `AxLicenseCode`.
+- `select [TableName]` (all-fields form — no field list, no `from`) confirmed working: covered by `_XPP_SELECT_RE` directly and tested via `test_select_no_modifiers_no_modifier_key`.
+- +1 regression test.
+
 ### Test suite after session 5
 
 ```powershell
 & 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
 ```
 
-Result: **125 passed** (was 115 at session start; +10 new tests).
+Result: **126 passed** (was 115 at session start; +11 new tests).
 
 ---
 
@@ -519,13 +527,13 @@ $env:UV_CACHE_DIR='C:\GitRepos\code-review-graph\.uv-cache'
 $env:UV_PYTHON_INSTALL_DIR='C:\GitRepos\code-review-graph\.uv-python'
 ```
 
-3. Start from current HEAD.
+3. Start from current HEAD (`4a271f2`).
 4. Re-run the focused validation:
 
 ```powershell
 & 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
 ```
 
-Expected: **125 passed**.
+Expected: **126 passed**.
 
 5. No known correctness gaps remain. All items from the original roadmap are complete.
