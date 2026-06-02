@@ -987,6 +987,7 @@ def main() -> None:
 
     try:
         if args.command == "build":
+            import time as _time
             pp = (
                 "none"
                 if getattr(args, "skip_postprocess", False)
@@ -994,20 +995,26 @@ def main() -> None:
             )
             from .tools.build import build_or_update_graph
 
+            print(f"Building graph for {repo_root} …", flush=True)
+            _t0 = _time.monotonic()
             result = build_or_update_graph(
                 full_rebuild=True,
                 repo_root=str(repo_root),
                 postprocess=pp,
                 xpp_base_root=args.xpp_base_root,
             )
+            elapsed = _time.monotonic() - _t0
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(f"Full build: {parsed} files, {nodes} nodes, {edges} edges (postprocess={pp})")
-            if result.get("errors"):
-                print(f"Errors: {len(result['errors'])}")
+            n_errors = len(result.get("errors", []))
+            m, s = divmod(int(elapsed), 60)
+            elapsed_str = f"{m}m {s}s" if m else f"{s}s"
+            err_str = f" · {n_errors} errors" if n_errors else ""
+            print(f"Done  {parsed} files · {nodes} nodes · {edges} edges · {elapsed_str}{err_str}")
 
         elif args.command == "update":
+            import time as _time
             pp = (
                 "none"
                 if getattr(args, "skip_postprocess", False)
@@ -1015,6 +1022,8 @@ def main() -> None:
             )
             from .tools.build import build_or_update_graph
 
+            print(f"Updating graph for {repo_root} …", flush=True)
+            _t0 = _time.monotonic()
             result = build_or_update_graph(
                 full_rebuild=False,
                 repo_root=str(repo_root),
@@ -1022,14 +1031,15 @@ def main() -> None:
                 postprocess=pp,
                 xpp_base_root=args.xpp_base_root,
             )
+            elapsed = _time.monotonic() - _t0
             updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(
-                f"Incremental: {updated} files updated, "
-                f"{nodes} nodes, {edges} edges"
-                f" (postprocess={pp})"
-            )
+            n_errors = len(result.get("errors", []))
+            m, s = divmod(int(elapsed), 60)
+            elapsed_str = f"{m}m {s}s" if m else f"{s}s"
+            err_str = f" · {n_errors} errors" if n_errors else ""
+            print(f"Done  {updated} files · {nodes} nodes · {edges} edges · {elapsed_str}{err_str}")
 
             # --brief: append a one-line change-impact summary with the same
             # estimated context-savings approximation that detect-changes uses.

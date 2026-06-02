@@ -26,6 +26,7 @@ class TestRunPostProcessing:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def _seed_data(self):
@@ -181,6 +182,7 @@ class TestRunPostProcessing:
             assert result["fts_indexed"] == 0
         finally:
             empty_store.close()
+            empty_tmp.close()
             Path(empty_tmp.name).unlink(missing_ok=True)
 
     def test_idempotent(self):
@@ -228,6 +230,7 @@ class TestPostProcessingStepIsolation:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def test_fts_failure_does_not_block_flows(self):

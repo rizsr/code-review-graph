@@ -182,6 +182,14 @@ class GraphStore:
             self._nxg_cache = None
 
     def close(self) -> None:
+        try:
+            # Flush WAL and switch back to DELETE journal so the -wal/-shm
+            # side-files are removed before close(). Required on Windows where
+            # open file handles block deletion (PermissionError WinError 32).
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("PRAGMA journal_mode=DELETE")
+        except Exception:
+            pass
         self._conn.close()
 
     # --- Write operations ---

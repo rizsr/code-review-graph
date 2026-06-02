@@ -164,6 +164,14 @@ def load_config(path: Path | None = None) -> DaemonConfig:
 # ---------------------------------------------------------------------------
 
 
+def _toml_str(value: object) -> str:
+    """Return a TOML-safe double-quoted string value for *value*.
+
+    Backslashes in Windows paths are escaped so the output is valid TOML.
+    """
+    return str(value).replace("\\", "\\\\")
+
+
 def _serialize_toml(config: DaemonConfig) -> str:
     """Serialize a :class:`DaemonConfig` to TOML text.
 
@@ -171,15 +179,15 @@ def _serialize_toml(config: DaemonConfig) -> str:
     """
     lines: list[str] = [
         "[daemon]",
-        f'session_name = "{config.session_name}"',
-        f'log_dir = "{config.log_dir}"',
+        f'session_name = "{_toml_str(config.session_name)}"',
+        f'log_dir = "{_toml_str(config.log_dir)}"',
         f"poll_interval = {config.poll_interval}",
     ]
     for repo in config.repos:
         lines.append("")
         lines.append("[[repos]]")
-        lines.append(f'path = "{repo.path}"')
-        lines.append(f'alias = "{repo.alias}"')
+        lines.append(f'path = "{_toml_str(repo.path)}"')
+        lines.append(f'alias = "{_toml_str(repo.alias)}"')
     lines.append("")  # trailing newline
     return "\n".join(lines)
 

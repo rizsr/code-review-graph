@@ -23,7 +23,32 @@ from .graph import GraphStore
 from .parser import CodeParser
 from .xpp_config import get_xpp_base_roots
 
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:  # pragma: no cover
+    _HAS_TQDM = False
+
 _MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
+
+
+def _progress(iterable, total: int, desc: str, unit: str = "file"):
+    """Wrap *iterable* in a tqdm bar, or fall back to a plain counter on stderr."""
+    if _HAS_TQDM:
+        return _tqdm(iterable, total=total, desc=desc, unit=unit, dynamic_ncols=True)
+    # Minimal fallback: print a counter every 50 items without tqdm
+    def _plain(it):
+        for i, item in enumerate(it, 1):
+            yield item
+            if i % 50 == 0 or i == total:
+                print(f"\r  {desc}: {i}/{total}", end="", flush=True, file=sys.stderr)
+        print(file=sys.stderr)  # newline when done
+    return _plain(iterable)
+
+
+def _phase(msg: str) -> None:
+    """Print a build-phase label to stderr."""
+    print(f"  {msg}", file=sys.stderr, flush=True)
 
 
 def _select_executor_kind() -> str:
@@ -865,7 +890,7 @@ def full_build(
 
     if use_serial or file_count < 8:
         # Serial fallback (for debugging or tiny repos)
-        for i, rel_path in enumerate(files, 1):
+        for i, rel_path in _progress(enumerate(files, 1), total=file_count, desc="Parsing"):
             full_path = Path(abs_files[i - 1])
             try:
                 source = full_path.read_bytes()
@@ -879,8 +904,6 @@ def full_build(
             except Exception as e:
                 logger.warning("Error parsing %s: %s", full_path, e)
                 errors.append({"file": str(full_path), "error": str(e)})
-            if i % 50 == 0 or i == file_count:
-                logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
         # Parallel parsing — store calls remain serial (SQLite single-writer).
         # Executor kind auto-selected: process on Linux/macOS/Windows-TTY,
@@ -888,24 +911,17 @@ def full_build(
         # deadlock (issues #46, #136). Override via CRG_PARSE_EXECUTOR env.
         args_list = abs_files
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
-            for i, (abs_path_str, nodes, edges, error, fhash) in enumerate(
-                executor.map(_parse_single_file, args_list, chunksize=20),
-                1,
+            mapped = executor.map(_parse_single_file, args_list, chunksize=20)
+            for i, (abs_path_str, nodes, edges, error, fhash) in _progress(
+                enumerate(mapped, 1), total=file_count, desc="Parsing"
             ):
                 if error:
                     logger.warning("Error parsing %s: %s", abs_path_str, error)
                     errors.append({"file": abs_path_str, "error": error})
                     continue
-                store.store_file_nodes_edges(
-                    abs_path_str,
-                    nodes,
-                    edges,
-                    fhash,
-                )
+                store.store_file_nodes_edges(abs_path_str, nodes, edges, fhash)
                 total_nodes += len(nodes)
                 total_edges += len(edges)
-                if i % 200 == 0 or i == file_count:
-                    logger.info("Progress: %d/%d files parsed", i, file_count)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
@@ -1022,21 +1038,16 @@ def incremental_update(
         # See full-build comment above for executor kind rationale.
         args_list = [str((repo_root / rel_path).resolve()) for rel_path in to_parse]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
-            for abs_path_str, nodes, edges, error, fhash in executor.map(
-                _parse_single_file,
-                args_list,
-                chunksize=20,
+            mapped = executor.map(_parse_single_file, args_list, chunksize=20)
+            n_parse = len(to_parse)
+            for i, (abs_path_str, nodes, edges, error, fhash) in _progress(
+                enumerate(mapped, 1), total=n_parse, desc="Updating"
             ):
                 if error:
                     logger.warning("Error parsing %s: %s", abs_path_str, error)
                     errors.append({"file": abs_path_str, "error": error})
                     continue
-                store.store_file_nodes_edges(
-                    abs_path_str,
-                    nodes,
-                    edges,
-                    fhash,
-                )
+                store.store_file_nodes_edges(abs_path_str, nodes, edges, fhash)
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 

@@ -16,6 +16,7 @@ class TestGraphStore:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def _make_file_node(self, path="/test/file.py"):
@@ -266,6 +267,7 @@ class TestImpactRadiusSql:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def _build_chain(self):
@@ -329,6 +331,7 @@ class TestGetTransitiveTestsFrontierCap:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def _add_func(self, name: str, path: str) -> str:

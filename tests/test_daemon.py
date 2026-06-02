@@ -38,19 +38,23 @@ def sample_config_file(tmp_path):
     repo_b.mkdir()
     (repo_b / ".git").mkdir()
 
+    # Use forward slashes so Windows paths are valid TOML double-quoted strings
+    log_dir = str(tmp_path / "logs").replace("\\", "/")
+    path_a = str(repo_a).replace("\\", "/")
+    path_b = str(repo_b).replace("\\", "/")
     config = tmp_path / "watch.toml"
     config.write_text(
         f"[daemon]\n"
         f'session_name = "test-session"\n'
-        f'log_dir = "{tmp_path / "logs"}"\n'
+        f'log_dir = "{log_dir}"\n'
         f"poll_interval = 5\n"
         f"\n"
         f"[[repos]]\n"
-        f'path = "{repo_a}"\n'
+        f'path = "{path_a}"\n'
         f'alias = "alpha"\n'
         f"\n"
         f"[[repos]]\n"
-        f'path = "{repo_b}"\n'
+        f'path = "{path_b}"\n'
         f'alias = "beta"\n',
         encoding="utf-8",
     )
@@ -95,7 +99,7 @@ class TestConfigParsing:
 
         config_file = tmp_path / "watch.toml"
         config_file.write_text(
-            f'[[repos]]\npath = "{repo}"\n',
+            f'[[repos]]\npath = "{str(repo).replace(chr(92), "/")}"\n',
             encoding="utf-8",
         )
         cfg = load_config(config_file)
@@ -122,10 +126,12 @@ class TestConfigParsing:
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
 
+        pa = str(repo_a).replace("\\", "/")
+        pb = str(repo_b).replace("\\", "/")
         config_file = tmp_path / "watch.toml"
         config_file.write_text(
-            f'[[repos]]\npath = "{repo_a}"\nalias = "dup"\n\n'
-            f'[[repos]]\npath = "{repo_b}"\nalias = "dup"\n',
+            f'[[repos]]\npath = "{pa}"\nalias = "dup"\n\n'
+            f'[[repos]]\npath = "{pb}"\nalias = "dup"\n',
             encoding="utf-8",
         )
         cfg = load_config(config_file)
@@ -139,7 +145,7 @@ class TestConfigParsing:
 
         config_file = tmp_path / "watch.toml"
         config_file.write_text(
-            f'[[repos]]\npath = "{bare}"\nalias = "bare"\n',
+            f'[[repos]]\npath = "{str(bare).replace(chr(92), "/")}"\nalias = "bare"\n',
             encoding="utf-8",
         )
         cfg = load_config(config_file)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import sys
 import time
 from typing import Any
 
@@ -12,6 +13,10 @@ from ..xpp_config import get_xpp_base_roots, set_xpp_base_roots
 from ._common import _get_store
 
 logger = logging.getLogger(__name__)
+
+
+def _phase(msg: str) -> None:
+    print(f"  {msg}", file=sys.stderr, flush=True)
 
 
 def _run_postprocess(
@@ -35,6 +40,7 @@ def _run_postprocess(
         return warnings
 
     # -- Signatures + FTS (fast, always run unless "none") --
+    _phase("Building signatures…")
     try:
         rows = store.get_nodes_without_signature()
         for row in rows:
@@ -60,6 +66,7 @@ def _run_postprocess(
         logger.warning("Signature computation failed: %s", e)
         warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
 
+    _phase("Rebuilding FTS index…")
     try:
         from code_review_graph.search import rebuild_fts_index
 
@@ -76,6 +83,7 @@ def _run_postprocess(
     # -- Expensive: flows + communities (only for "full") --
     use_incremental = not full_rebuild and bool(changed_files)
 
+    _phase("Detecting flows…")
     try:
         if use_incremental:
             from code_review_graph.flows import incremental_trace_flows
@@ -92,6 +100,7 @@ def _run_postprocess(
         logger.warning("Flow detection failed: %s", e)
         warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
 
+    _phase("Detecting communities…")
     try:
         if use_incremental:
             from code_review_graph.communities import (

@@ -22,7 +22,8 @@ class TestChanges:
         self.store = GraphStore(self.tmp.name)
 
     def teardown_method(self):
-        self.store.close()
+        GraphStore.close(self.store)  # bypass any instance-level close patch
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     # -- helpers --
@@ -484,6 +485,7 @@ class TestAnalyzeChangesFunctionCap:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def _add_funcs(self, count: int, path: str = "app.py") -> None:

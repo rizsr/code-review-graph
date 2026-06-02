@@ -31,6 +31,7 @@ class TestTools:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def _seed_data(self):
@@ -463,6 +464,7 @@ class TestFindLargeFunctions:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def test_finds_large_functions(self):
@@ -1091,6 +1093,7 @@ class TestComputeSummaries:
 
     def teardown_method(self):
         self.store.close()
+        self.tmp.close()
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def _seed_graph(self):
