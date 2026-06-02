@@ -8,6 +8,18 @@ import sys
 import time
 from typing import Any
 
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:  # pragma: no cover
+    _HAS_TQDM = False
+
+
+def _progress(iterable, total: int, desc: str, unit: str = "it"):
+    if _HAS_TQDM:
+        return _tqdm(iterable, total=total, desc=desc, unit=unit, dynamic_ncols=True)
+    return iterable
+
 from ..incremental import full_build, incremental_update
 from ..xpp_config import get_xpp_base_roots, set_xpp_base_roots
 from ._common import _get_store
@@ -43,7 +55,7 @@ def _run_postprocess(
     _phase("Building signatures…")
     try:
         rows = store.get_nodes_without_signature()
-        for row in rows:
+        for row in _progress(rows, total=len(rows), desc="Signatures", unit="node"):
             node_id, name, kind, params, ret = (
                 row[0],
                 row[1],
@@ -124,6 +136,7 @@ def _run_postprocess(
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
 
     # -- Compute pre-computed summary tables --
+    _phase("Computing summaries…")
     try:
         _compute_summaries(store)
         build_result["summaries_computed"] = True

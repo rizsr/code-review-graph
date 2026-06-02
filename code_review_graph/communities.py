@@ -9,10 +9,29 @@ from __future__ import annotations
 import logging
 import random
 import re
+import sys
 from collections import Counter, defaultdict
 from typing import Any
 
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
+
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:  # pragma: no cover
+    _HAS_TQDM = False
+
+
+def _progress(iterable, total: int, desc: str, unit: str = "it"):
+    if _HAS_TQDM:
+        return _tqdm(iterable, total=total, desc=desc, unit=unit, dynamic_ncols=True)
+    def _plain(it):
+        for i, item in enumerate(it, 1):
+            yield item
+            if i % 50 == 0 or i == total:
+                print(f"\r  {desc}: {i}/{total}", end="", flush=True, file=sys.stderr)
+        print(file=sys.stderr)
+    return _plain(iterable)
 
 # Fixed seed for igraph's RNG so Leiden community detection is reproducible
 # across runs. Without this, two builds of the same graph produce different
@@ -709,7 +728,7 @@ def store_communities(
         conn.execute("UPDATE nodes SET community_id = NULL")
 
         count = 0
-        for comm in communities:
+        for comm in _progress(communities, total=len(communities), desc="Storing communities", unit="comm"):
             cursor = conn.execute(
                 """INSERT INTO communities
                    (name, level, cohesion, size, dominant_language, description)

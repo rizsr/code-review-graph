@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 from collections import deque
 from typing import Optional
 
@@ -18,6 +19,24 @@ from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
 
 logger = logging.getLogger(__name__)
+
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:  # pragma: no cover
+    _HAS_TQDM = False
+
+
+def _progress(iterable, total: int, desc: str, unit: str = "it"):
+    if _HAS_TQDM:
+        return _tqdm(iterable, total=total, desc=desc, unit=unit, dynamic_ncols=True)
+    def _plain(it):
+        for i, item in enumerate(it, 1):
+            yield item
+            if i % 50 == 0 or i == total:
+                print(f"\r  {desc}: {i}/{total}", end="", flush=True, file=sys.stderr)
+        print(file=sys.stderr)
+    return _plain(iterable)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -290,7 +309,7 @@ def trace_flows(
     adj = store.load_flow_adjacency()
     flows: list[dict] = []
 
-    for ep in entry_points:
+    for ep in _progress(entry_points, total=len(entry_points), desc="Tracing flows", unit="ep"):
         flow = _trace_single_flow(adj, ep, max_depth)
         if flow is not None:
             flows.append(flow)
@@ -403,7 +422,7 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
         conn.execute("DELETE FROM flows")
 
         count = 0
-        for flow in flows:
+        for flow in _progress(flows, total=len(flows), desc="Storing flows", unit="flow"):
             path_json = json.dumps(flow.get("path", []))
             conn.execute(
                 """INSERT INTO flows
