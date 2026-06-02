@@ -239,6 +239,267 @@ public static InventLocation find()
             store.close()
 
 
+class TestXppCoCResolution:
+    """Stronger Chain of Command (CoC) WRAPS resolution: naming fallback + signature awareness."""
+
+    def _build_coc_repo(
+        self,
+        tmp_path: Path,
+        ext_name: str,
+        ext_decl: str,
+        ext_method_params: str,
+        base_methods: list[tuple[str, str]],  # (method_name, params)
+    ) -> "GraphStore":
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / ".git").mkdir()
+
+        ext_xml = (
+            repo_root / "Metadata" / "Pkg" / "Pkg" / "AxClass" / f"{ext_name}.xml"
+        )
+        methods_xml = f"""
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process({ext_method_params})
+{{
+    next process({ext_method_params.split()[0] if ext_method_params else ""});
+}}
+]]></Source>
+      </Method>"""
+        _write_xpp_class(ext_xml, f"""<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>{ext_name}</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+{ext_decl}
+]]></Declaration>
+    <Methods>{methods_xml}
+    </Methods>
+  </SourceCode>
+</AxClass>
+""")
+
+        base_root = tmp_path / "PackagesLocalDirectory"
+        base_method_xml = "".join(
+            f"""
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process({params})
+{{
+}}
+]]></Source>
+      </Method>"""
+            for _, params in base_methods
+        )
+        base_xml = (
+            base_root / "Base" / "Base" / "AxClass" / "BaseService.xml"
+        )
+        _write_xpp_class(base_xml, f"""<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>BaseService</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class BaseService
+{{
+}}
+]]></Declaration>
+    <Methods>{base_method_xml}
+    </Methods>
+  </SourceCode>
+</AxClass>
+""")
+        db_path = repo_root / ".code-review-graph" / "graph.db"
+        store = GraphStore(db_path)
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=[str(ext_xml.relative_to(repo_root))],
+        ):
+            full_build(repo_root, store, xpp_base_roots=[str(base_root)])
+        return store
+
+    def test_extension_naming_fallback(self, tmp_path):
+        """Class named BaseService_Extension without [ExtensionOf] still gets WRAPS via name suffix."""
+        store = self._build_coc_repo(
+            tmp_path,
+            ext_name="BaseService_Extension",
+            ext_decl="public class BaseService_Extension\n{",
+            ext_method_params="str reason",
+            base_methods=[("process", "str reason")],
+        )
+        try:
+            wraps = store._conn.execute(
+                "SELECT source_qualified, target_qualified, extra FROM edges WHERE kind='WRAPS'"
+            ).fetchall()
+            assert wraps, "Expected WRAPS edge from _Extension suffix fallback"
+            assert any("process" in r["target_qualified"] for r in wraps)
+        finally:
+            store.close()
+
+    def test_signature_exact_match_preferred(self, tmp_path):
+        """When two overloads exist, param-count match wins over name-only."""
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / ".git").mkdir()
+
+        ext_xml = (
+            repo_root / "Metadata" / "Pkg" / "Pkg" / "AxClass"
+            / "BaseService_Extension.xml"
+        )
+        _write_xpp_class(ext_xml, """<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>BaseService_Extension</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class BaseService_Extension
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process(str reason, int count)
+{
+    next process(reason, count);
+}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""")
+        base_root = tmp_path / "PackagesLocalDirectory"
+        base_xml = base_root / "Base" / "Base" / "AxClass" / "BaseService.xml"
+        _write_xpp_class(base_xml, """<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>BaseService</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class BaseService
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process()
+{
+}
+]]></Source>
+      </Method>
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process(str reason, int count)
+{
+}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""")
+        db_path = repo_root / ".code-review-graph" / "graph.db"
+        store = GraphStore(db_path)
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=[str(ext_xml.relative_to(repo_root))],
+        ):
+            full_build(repo_root, store, xpp_base_roots=[str(base_root)])
+        try:
+            wraps = store._conn.execute(
+                "SELECT source_qualified, target_qualified, extra FROM edges WHERE kind='WRAPS'"
+            ).fetchall()
+            assert wraps
+            # The matching edge should be exact confidence (2-param version matched).
+            import json as _json
+            for row in wraps:
+                extra = _json.loads(row["extra"] or "{}")
+                assert extra.get("xpp_wraps_confidence") == "exact", \
+                    f"Expected exact confidence, got: {extra}"
+        finally:
+            store.close()
+
+    def test_wraps_confidence_name_only_when_no_param_match(self, tmp_path):
+        """When param counts don't match, confidence is name_only not exact."""
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / ".git").mkdir()
+
+        ext_xml = (
+            repo_root / "Metadata" / "Pkg" / "Pkg" / "AxClass"
+            / "BaseService_Extension.xml"
+        )
+        _write_xpp_class(ext_xml, """<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>BaseService_Extension</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class BaseService_Extension
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process(str reason, int count, boolean flag)
+{
+    next process(reason, count, flag);
+}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""")
+        base_root = tmp_path / "PackagesLocalDirectory"
+        base_xml = base_root / "Base" / "Base" / "AxClass" / "BaseService.xml"
+        _write_xpp_class(base_xml, """<?xml version="1.0" encoding="utf-8"?>
+<AxClass>
+  <Name>BaseService</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+public class BaseService
+{
+}
+]]></Declaration>
+    <Methods>
+      <Method>
+        <Name>process</Name>
+        <Source><![CDATA[
+public void process()
+{
+}
+]]></Source>
+      </Method>
+    </Methods>
+  </SourceCode>
+</AxClass>
+""")
+        db_path = repo_root / ".code-review-graph" / "graph.db"
+        store = GraphStore(db_path)
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=[str(ext_xml.relative_to(repo_root))],
+        ):
+            full_build(repo_root, store, xpp_base_roots=[str(base_root)])
+        try:
+            wraps = store._conn.execute(
+                "SELECT extra FROM edges WHERE kind='WRAPS'"
+            ).fetchall()
+            assert wraps
+            import json as _json
+            for row in wraps:
+                extra = _json.loads(row["extra"] or "{}")
+                assert extra.get("xpp_wraps_confidence") == "name_only"
+        finally:
+            store.close()
+
+
 class TestXppArtifactDepth:
     def setup_method(self):
         self.parser = CodeParser()

@@ -61,6 +61,31 @@ _XPP_ARTIFACT_FOLDERS = {
 }
 
 
+def _param_count(params_str: str) -> int:
+    """Return the number of parameters from a comma-separated params string."""
+    stripped = params_str.strip()
+    if not stripped:
+        return 0
+    return stripped.count(",") + 1
+
+
+def _pick_best_wraps_candidate(
+    candidates: list,
+    ext_params: str,
+) -> Optional[object]:
+    """Pick the base method that best matches the extension method's parameter count.
+
+    Prefers exact param-count match; falls back to first candidate (name-only match).
+    """
+    if not candidates:
+        return None
+    ext_count = _param_count(ext_params)
+    for cand in candidates:
+        if _param_count(cand["params"] or "") == ext_count:
+            return cand
+    return candidates[0]
+
+
 def resolve_xpp_metadata(
     store: GraphStore,
     base_roots: list[str] | None = None,
@@ -112,7 +137,7 @@ def resolve_xpp_metadata(
                 changed = True
 
         wrap_rows = cur.execute(
-            "SELECT qualified_name, name, parent_name, file_path, extra FROM nodes "
+            "SELECT qualified_name, name, parent_name, file_path, params, extra FROM nodes "
             "WHERE kind='Function' AND language='xpp' AND extra LIKE '%xpp_calls_next%'"
         ).fetchall()
         for row in wrap_rows:
@@ -123,6 +148,14 @@ def resolve_xpp_metadata(
             if not extra.get("xpp_calls_next"):
                 continue
             target_artifact = extra.get("xpp_extension_target")
+            # Fallback: infer target from *_Extension naming convention when no
+            # [ExtensionOf(...)] attribute was present.
+            if not target_artifact:
+                parent = row["parent_name"] or ""
+                for suffix in ("_Extension", "Extension"):
+                    if parent.endswith(suffix):
+                        target_artifact = parent[: -len(suffix)]
+                        break
             if not isinstance(target_artifact, str) or not target_artifact:
                 continue
             resolved_artifact = _resolve_target(
@@ -137,26 +170,40 @@ def resolve_xpp_metadata(
             if not resolved_artifact:
                 continue
             base_name = resolved_artifact.split("::")[-1].split(".")[0]
-            candidate = store._conn.execute(
-                "SELECT qualified_name FROM nodes "
+            # Signature-aware candidate selection: prefer param-count match.
+            candidates = store._conn.execute(
+                "SELECT qualified_name, params FROM nodes "
                 "WHERE kind='Function' AND parent_name=? AND name=?",
                 (base_name, row["name"]),
-            ).fetchone()
-            if not candidate:
+            ).fetchall()
+            if not candidates:
+                continue
+            best_candidate = _pick_best_wraps_candidate(
+                candidates, row["params"] or ""
+            )
+            if not best_candidate:
                 continue
             exists = store._conn.execute(
                 "SELECT 1 FROM edges "
                 "WHERE kind='WRAPS' AND source_qualified=? AND target_qualified=?",
-                (row["qualified_name"], candidate["qualified_name"]),
+                (row["qualified_name"], best_candidate["qualified_name"]),
             ).fetchone()
             if exists:
                 continue
+            # Record confidence: exact (param count matched) vs name_only.
+            ext_params = row["params"] or ""
+            base_params = best_candidate["params"] or ""
+            confidence = (
+                "exact"
+                if _param_count(ext_params) == _param_count(base_params)
+                else "name_only"
+            )
             store.upsert_edge(EdgeInfo(
                 kind="WRAPS",
                 source=row["qualified_name"],
-                target=candidate["qualified_name"],
+                target=best_candidate["qualified_name"],
                 file_path=row["file_path"],
-                extra={"xpp_resolved": True},
+                extra={"xpp_resolved": True, "xpp_wraps_confidence": confidence},
             ))
             stats["wrappers_resolved"] += 1
             changed = True
