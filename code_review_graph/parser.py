@@ -1532,6 +1532,21 @@ class CodeParser:
                     file_path=file_path,
                     line=1,
                 ))
+            # Field group membership: each group CONTAINS its member fields.
+            for fg_el in root.findall(".//FieldGroups/AxTableFieldGroup"):
+                fg_name = (fg_el.findtext("./Name") or "").strip()
+                if not fg_name:
+                    continue
+                for fg_field_el in fg_el.findall(".//Fields/AxTableFieldGroupField"):
+                    data_field = (fg_field_el.findtext("./DataField") or "").strip()
+                    if data_field:
+                        edges.append(EdgeInfo(
+                            kind="REFERENCES",
+                            source=artifact_qn,
+                            target=data_field,
+                            file_path=file_path,
+                            extra={"xpp_ref_kind": "field_group", "xpp_field_group": fg_name},
+                        ))
             for mapping_el in root.findall(".//Mappings/AxMapMapping"):
                 mapping_table = (mapping_el.findtext("./MappingTable") or "").strip()
                 if mapping_table:
@@ -1591,6 +1606,18 @@ class CodeParser:
                         file_path=file_path,
                         extra={"xpp_ref_kind": "view_table"},
                     ))
+
+        if object_type in ("AxEdt", "AxEdtExtension"):
+            extends = (root.findtext("./Extends") or "").strip()
+            if extends:
+                edges.append(EdgeInfo(
+                    kind="INHERITS",
+                    source=artifact_qn,
+                    target=extends,
+                    file_path=file_path,
+                    line=1,
+                    extra={"xpp_ref_kind": "edt"},
+                ))
 
         if root.tag.endswith("AxEventSubscription"):
             publisher = (root.findtext("./Publisher") or "").strip()
@@ -1663,6 +1690,29 @@ class CodeParser:
                     kind="CONTAINS",
                     source=artifact_qn,
                     target=self._qualify(field_name, file_path, artifact_name),
+                    file_path=file_path,
+                    line=1,
+                ))
+
+        elif object_type in ("AxEnum", "AxEnumExtension"):
+            for ev_el in root.findall(".//EnumValues/AxEnumValue"):
+                ev_name = (ev_el.findtext("./Name") or "").strip()
+                if not ev_name:
+                    continue
+                child_nodes.append(NodeInfo(
+                    kind="Field",
+                    name=ev_name,
+                    file_path=file_path,
+                    line_start=1,
+                    line_end=1,
+                    language="xpp-metadata",
+                    parent_name=artifact_name,
+                    extra={**artifact_extra, "xpp_enum_value": True},
+                ))
+                child_edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=artifact_qn,
+                    target=self._qualify(ev_name, file_path, artifact_name),
                     file_path=file_path,
                     line=1,
                 ))

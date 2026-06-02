@@ -866,3 +866,133 @@ public void customHelper()
         assert any(n.name == "validateWrite" for n in event_nodes)
         assert non_event_nodes  # customHelper present but NOT flagged as event
         assert not non_event_nodes[0].extra.get("xpp_ds_event")
+
+
+class TestXppTableFieldGroupsEdtEnum:
+    """Field group membership, EDT inheritance chains, and enum value nodes."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _write_xml(self, tmp_path, folder: str, name: str, body: str):
+        xml_path = tmp_path / "Metadata" / "Pkg" / "Pkg" / folder / f"{name}.xml"
+        xml_path.parent.mkdir(parents=True, exist_ok=True)
+        xml_path.write_text(body, encoding="utf-8")
+        return xml_path
+
+    def test_table_field_group_references(self, tmp_path):
+        """Fields inside a FieldGroup emit REFERENCES(field_group) edges."""
+        xml_path = self._write_xml(
+            tmp_path, "AxTable", "SalesTable",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxTable>
+  <Name>SalesTable</Name>
+  <FieldGroups>
+    <AxTableFieldGroup>
+      <Name>AutoIdentification</Name>
+      <Fields>
+        <AxTableFieldGroupField>
+          <DataField>SalesId</DataField>
+        </AxTableFieldGroupField>
+        <AxTableFieldGroupField>
+          <DataField>CustAccount</DataField>
+        </AxTableFieldGroupField>
+      </Fields>
+    </AxTableFieldGroup>
+  </FieldGroups>
+</AxTable>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        fg_edges = [
+            e for e in edges
+            if e.kind == "REFERENCES" and e.extra.get("xpp_ref_kind") == "field_group"
+        ]
+        fg_targets = {e.target for e in fg_edges}
+        assert "SalesId" in fg_targets
+        assert "CustAccount" in fg_targets
+        assert all(e.extra.get("xpp_field_group") == "AutoIdentification" for e in fg_edges)
+
+    def test_edt_inherits_edge(self, tmp_path):
+        """AxEdt with <Extends> emits an INHERITS edge to the parent EDT."""
+        xml_path = self._write_xml(
+            tmp_path, "AxEdt", "SalesIdBase_MY",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEdt>
+  <Name>SalesIdBase_MY</Name>
+  <Extends>SalesIdBase</Extends>
+</AxEdt>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        inherits_edges = [e for e in edges if e.kind == "INHERITS"]
+        assert any(e.target == "SalesIdBase" for e in inherits_edges)
+        assert any(e.extra.get("xpp_ref_kind") == "edt" for e in inherits_edges)
+
+    def test_edt_extension_inherits(self, tmp_path):
+        """AxEdtExtension with <Extends> also emits INHERITS."""
+        xml_path = self._write_xml(
+            tmp_path, "AxEdtExtension", "VendAccount_Extension",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEdtExtension>
+  <Name>VendAccount_Extension</Name>
+  <Extends>AccountNum</Extends>
+</AxEdtExtension>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(e.kind == "INHERITS" and e.target == "AccountNum" for e in edges)
+
+    def test_enum_value_nodes_extracted(self, tmp_path):
+        """Enum values are extracted as Field nodes with xpp_enum_value=True."""
+        xml_path = self._write_xml(
+            tmp_path, "AxEnum", "SalesStatus",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEnum>
+  <Name>SalesStatus</Name>
+  <EnumValues>
+    <AxEnumValue>
+      <Name>None</Name>
+    </AxEnumValue>
+    <AxEnumValue>
+      <Name>Backorder</Name>
+    </AxEnumValue>
+    <AxEnumValue>
+      <Name>Delivered</Name>
+    </AxEnumValue>
+    <AxEnumValue>
+      <Name>Invoiced</Name>
+    </AxEnumValue>
+  </EnumValues>
+</AxEnum>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        enum_fields = {n.name for n in nodes if n.kind == "Field" and n.extra.get("xpp_enum_value")}
+        assert "None" in enum_fields
+        assert "Backorder" in enum_fields
+        assert "Delivered" in enum_fields
+        assert "Invoiced" in enum_fields
+
+    def test_enum_value_contains_edges(self, tmp_path):
+        """Each enum value has a CONTAINS edge from the parent artifact."""
+        xml_path = self._write_xml(
+            tmp_path, "AxEnum", "CustPaymMode",
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEnum>
+  <Name>CustPaymMode</Name>
+  <EnumValues>
+    <AxEnumValue>
+      <Name>None</Name>
+    </AxEnumValue>
+    <AxEnumValue>
+      <Name>Check</Name>
+    </AxEnumValue>
+  </EnumValues>
+</AxEnum>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        contains_targets = {e.target for e in edges if e.kind == "CONTAINS"}
+        assert any("None" in t for t in contains_targets)
+        assert any("Check" in t for t in contains_targets)
