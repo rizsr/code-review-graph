@@ -246,106 +246,112 @@ Current work is saved in:
 - `2607ac4 Add XML-first X++ metadata support`
 - `d4662f1 Fix X++ access query coverage`
 
+## Session 2 — What Was Completed (commit `e6f6511`)
+
+All four suggested next priorities were addressed.
+
+### 1. AxTable / AxForm / AxQuery / AxView / AxMap / AxEventSubscription extraction (DONE)
+
+- **AxTable**: `Field` child nodes (name + type), `<Relations>/<AxTableRelation>/<RelatedTable>` → `REFERENCES(table_relation)`, `<Extends>` → `INHERITS`
+- **AxForm**: `<DataSources>/<AxFormDataSource>/<Table>` → `REFERENCES(datasource_table)`, datasource method nodes extracted with full CALLS/ACCESSES tracing
+- **AxQuery / AxQuerySimpleExtension**: recursively finds `<AxQuerySimpleDataSource>/<Table>` → `REFERENCES(query_table)`
+- **AxView / AxDataEntityView and extensions**: same pattern → `REFERENCES(view_table)`
+- **AxMap**: `Field` child nodes from `<AxMapField>`, `<Mappings>/<AxMapMapping>/<MappingTable>` → `REFERENCES(map_table)`
+- **AxEventSubscription**: replaced generic tag-walk with structured `<Publisher>.<PublisherMethod>` → `HANDLES(event)`, `<EventHandler>` → `REFERENCES(class)`
+- **New `_extract_xpp_artifact_children`** method for Field/method child node emission
+- **`_XPP_METADATA_OBJECT_KINDS`** expanded from 18 to 68 entries — covers all `Ax*` folders seen in the real repo (AxMenu*, AxMenuItem*, AxSecurityRole*, AxWorkflow*, AxReport, AxTile, AxPage, AxKPI, AxService*, AxAggregate*, AxCompositeDataEntityView, AxFormPart, AxConfigurationKey, AxLicenseCode, AxReference, AxRuleSet, etc.)
+
+### 2. Better X++ syntax parsing (DONE)
+
+- **`_XPP_COMPILETIME_RE`**: added `dataEntityStr`, `menuStr`, `menuItemDisplayStr`, `menuItemOutputStr`, `menuItemActionStr`, `reportStr`, `ssrsReportStr`, `securityRoleStr`, `securityDutyStr`, `securityPrivilegeStr`, `workflowStr`, `configurationKeyStr`, `licenseCodeStr`, `tileStr`, `pageStr`, `resourceStr`, `varStr`
+- **`_XPP_JOIN_RE`**: new regex for `exists join`, `notexists join`, `outer join`, `join` table capture → `ACCESSES(join)` edges
+- **`_XPP_IMPLEMENTS_RE`** + updated **`_XPP_DECL_RE`**: `implements IFace1, IFace2` → `IMPLEMENTS` edges per interface
+- **`_XPP_DECL_RE`**: extended to match `interface` keyword alongside `class`
+- **`_XPP_KEYWORDS`**: extended with common X++ built-ins (super, this, null, true, false, str, int, real, boolean, retry, crosscompany, firstonly, maxof, etc.) to suppress noise in call extraction
+- **`XPP_METADATA_OBJECT_KINDS`**: public alias added so resolver can import without using private name
+
+### 3. Resolver coverage expansion (DONE)
+
+- **`_XPP_ARTIFACT_FOLDERS`**: 20+ new ref-kind → folder mappings: `table_relation`, `datasource_table`, `query_table`, `view_table`, `join`, `map_table`, `event`, `field`, `securityrole`, `securityduty`, `securityprivilege`, `workflow`, `report`, `ssrsreport`, `menu`, `menuitemdisplay/output/action`, `configurationkey`, `tile`, `page`, `resource`
+- **Resolution loop**: `INHERITS` and `IMPLEMENTS` edges now resolved in addition to EXTENDS/REFERENCES/ACCESSES/HANDLES
+- **`_find_local_artifact`**: now resolves `Field` nodes (for `fieldStr` refs and table fields) in addition to Function/Class/Type
+- **Performance**: `_get_base_index()` pre-indexes all Ax* XML files by artifact name once per process using module-level cache keyed on base roots; converts N × rglob(356k files) to 1 × walk + O(1) dict lookups
+
+### 4. Real-repo validation (DONE)
+
+Validated against `C:\GitRepos\RARnDInitiatives\Metadata\RnD\RnD` (real D365 extension repo):
+
+- **30 files parsed, 0 errors**
+- Edge breakdown: CALLS 234, CONTAINS 116, REFERENCES 93, ACCESSES 9, INHERITS 8, IMPLEMENTS 2
+- IMPLEMENTS edges confirmed live on real extension code (`RndMultiTaskJobController implements BatchRetryable`)
+- All 50+ recognized Ax* folder types detected without error
+
+Test suite: **81 passed** (was 72), +9 new test cases in `TestXppArtifactDepth` and `TestXppSyntaxParsing`.
+
+---
+
 ## What Is Still Missing For Full X++
 
-The current implementation is a solid base, but it is **not** full X++ support yet.
+The current implementation is substantially deeper, but still not full X++ support.
 
-### 1. More metadata object coverage
-
-Still needed across additional `Ax*` folders, for example:
-
-- menus / menu items
-- security artifacts
-- services / service groups
-- reports
-- workflow artifacts
-- pages / parts / cues
-- label/resources/macros/references
-- more data entity and aggregate families
-
-Each family likely needs explicit extraction rules from XML.
-
-### 2. Better X++ syntax understanding
-
-Current parser is heuristic only.
+### 1. Instance-call inference
 
 Still needed:
 
-- more reliable method signature parsing
-- instance-call inference
-- attributes beyond `ExtensionOf`
-- interfaces
-- inheritance variants
-- macros
-- exception constructs
-- more control-flow robustness
-- form methods / datasource methods / control methods
+- `obj.method()` calls can't be resolved without type inference
+- Variable declarations like `CustTable custTable; custTable.find()` need tracking
 
-### 3. Better data-access semantics
+### 2. Better data-access semantics
 
 Still needed:
 
-- full `select` forms
-- `exists join`, `notexists join`, `outer join`
-- `group by`, aggregates
-- `firstOnly`, `forUpdate`, `crossCompany`, etc.
-- SysDa coverage
+- `group by`, aggregates (`maxof`, `minof`, `sumof`, `avgof`, `countof`)
+- `firstOnly`, `forUpdate`, `crossCompany` modifiers (now suppressed from noise but not tracked)
+- SysDa API coverage (`SysDaQueryObject`, `SysDaSelectParameters`, etc.)
 - `Query*` object semantics
-- mapping access edges to exact table/query/view artifacts with higher confidence
+- Higher-confidence table-name capture from complex select forms
 
-### 4. Stronger extension and CoC resolution
-
-Still needed:
-
-- better signature-aware method matching
-- more extension target kinds
-- more reliable `next` resolution
-- handling more extension naming/layout variations
-
-### 5. Better event support
+### 3. Richer form/control extraction
 
 Still needed:
 
-- form control events
-- datasource events
-- attribute-based handler patterns
-- richer `AxEventSubscription` extraction
-- canonical publisher/member resolution
+- form control methods (from `<Design>/<Controls>/.../<Methods>`)
+- form control events (click, modified, etc.)
+- datasource events (init, active, validateWrite, etc.) — partially done but not for controls
 
-### 6. Richer metadata graph extraction
+### 4. Table/EDT inheritance + field groups
 
 Still needed from XML:
 
-- table fields
-- relations
-- indexes
-- field groups
-- form controls
-- form datasources
-- query datasource trees
-- enum values
-- EDT inheritance / references
+- `<FieldGroups>` → field group membership edges
+- EDT `<Extends>` chain following for type resolution
+- Enum value nodes
 
-Some of these may deserve explicit child nodes instead of only `REFERENCES`.
-
-### 7. Real-repo validation on Microsoft + extension code
+### 5. Stronger extension and CoC resolution
 
 Still needed:
 
-- run against large real D365 repos
-- measure parse coverage
-- check false positives / false negatives
-- check token-savings improvements
-- validate incremental update behavior on real package trees
+- signature-aware method matching in WRAPS resolution
+- handling extension naming variants beyond `_Extension` suffix
+- more reliable `next` resolution for methods with different signatures
 
-## Suggested Next Priority
+### 6. Better event support
 
-Best next steps, in order:
+Still needed:
 
-1. Deepen `AxTable`, `AxForm`, `AxQuery`, `AxView`, and event extraction
-2. Improve X++ method/call/data-access parsing
-3. Expand resolver coverage for more compile-time functions and extension targets
-4. Run large-repo validation against the local `PackagesLocalDirectory` plus one real extension repo
+- form control events (attribute-based `DataEventHandler`, `FormDataSourceEventHandler`, etc.)
+- canonical publisher/member resolution for `AxEventSubscription`
+- `PreEventHandler` vs `PostEventHandler` distinction in edges
+
+### 7. Full-pipeline large-repo validation with base roots
+
+Still needed:
+
+- run `full_build` with `--xpp-base-root PackagesLocalDirectory` and measure:
+  - lazy load hit rate (what fraction of references resolve to base artifacts)
+  - index build time for 356k-file base
+  - WRAPS edges generated for real CoC methods
+  - incremental update behavior on real package trees
 
 ## Resume Checklist
 
@@ -360,13 +366,17 @@ $env:UV_CACHE_DIR='C:\GitRepos\code-review-graph\.uv-cache'
 $env:UV_PYTHON_INSTALL_DIR='C:\GitRepos\code-review-graph\.uv-python'
 ```
 
-3. Start from the current commits:
-   - `2607ac4`
-   - `d4662f1`
+3. Start from commit `e6f6511`.
 4. Re-run the focused validation first:
 
 ```powershell
 & 'C:\Users\Adminb76b72ac39\.local\bin\uv.exe' run pytest tests/test_xpp.py tests/test_cli.py tests/test_incremental.py -q
 ```
 
-5. Then expand implementation coverage by artifact family.
+Expected: **81 passed**.
+
+5. Suggested next work (in order):
+   1. Instance-call inference (variable declaration tracking)
+   2. Richer form control/event extraction
+   3. Full-pipeline large-repo validation with base roots + WRAPS measurement
+   4. Table field groups and EDT inheritance chains
