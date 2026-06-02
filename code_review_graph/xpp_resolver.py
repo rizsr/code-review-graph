@@ -12,20 +12,51 @@ from pathlib import Path
 from typing import Optional
 
 from .graph import GraphStore
-from .parser import CodeParser, EdgeInfo
+from .parser import XPP_METADATA_OBJECT_KINDS, CodeParser, EdgeInfo
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache so large base roots are only indexed once per process.
+_BASE_INDEX_CACHE: dict[tuple[str, ...], dict[str, list[tuple[str, Path]]]] = {}
 
 _XPP_ARTIFACT_FOLDERS = {
     "class": ["AxClass"],
     "table": ["AxTable"],
     "form": ["AxForm"],
-    "enum": ["AxEnum"],
-    "edt": ["AxEdt"],
+    "enum": ["AxEnum", "AxEnumExtension"],
+    "edt": ["AxEdt", "AxEdtExtension"],
     "query": ["AxQuery"],
     "view": ["AxView"],
     "map": ["AxMap"],
     "dataentityview": ["AxDataEntityView"],
+    "dataentity": ["AxDataEntityView"],
+    # table-derived ref kinds all resolve to AxTable
+    "table_relation": ["AxTable"],
+    "datasource_table": ["AxTable"],
+    "query_table": ["AxTable"],
+    "view_table": ["AxTable"],
+    "join": ["AxTable"],
+    "map_table": ["AxTable"],
+    # field-level references resolve from the owning artifact
+    "field": ["AxTable", "AxMap", "AxDataEntityView"],
+    # event subscriptions: publisher can be class or table
+    "event": ["AxClass", "AxTable"],
+    # security / workflow / other metadata artifacts
+    "securityrole": ["AxSecurityRole"],
+    "securityduty": ["AxSecurityDuty"],
+    "securityprivilege": ["AxSecurityPrivilege"],
+    "workflow": ["AxWorkflow"],
+    "report": ["AxReport"],
+    "ssrsreport": ["AxReport"],
+    "menu": ["AxMenu"],
+    "menuitemdisplay": ["AxMenuItem"],
+    "menuitemoutput": ["AxMenuItem"],
+    "menuitemaction": ["AxMenuItem"],
+    "configurationkey": ["AxConfigurationKey"],
+    "licensecodesstr": ["AxLicenseCode"],
+    "tile": ["AxTile"],
+    "page": ["AxPage"],
+    "resource": ["AxResource"],
 }
 
 
@@ -48,13 +79,18 @@ def resolve_xpp_metadata(
         "base_roots": normalized_roots,
     }
 
+    base_index: Optional[dict[str, list[tuple[str, Path]]]] = None
+    if normalized_roots:
+        base_index = _get_base_index(normalized_roots)
+
     changed = True
     while changed:
         changed = False
         cur = store._conn.cursor()
         rows = cur.execute(
             "SELECT id, kind, source_qualified, target_qualified, file_path, line, extra "
-            "FROM edges WHERE kind IN ('EXTENDS', 'REFERENCES', 'ACCESSES', 'HANDLES')"
+            "FROM edges WHERE kind IN "
+            "('EXTENDS', 'REFERENCES', 'ACCESSES', 'HANDLES', 'INHERITS', 'IMPLEMENTS')"
         ).fetchall()
         for row in rows:
             edge_id = row["id"]
@@ -63,7 +99,9 @@ def resolve_xpp_metadata(
                 extra = json.loads(row["extra"] or "{}")
             except (json.JSONDecodeError, TypeError):
                 extra = {}
-            resolved = _resolve_target(store, parser, target, extra, normalized_roots, stats)
+            resolved = _resolve_target(
+                store, parser, target, extra, normalized_roots, stats, base_index,
+            )
             if resolved and resolved != target:
                 cur.execute(
                     "UPDATE edges SET target_qualified=?, extra=? WHERE id=?",
@@ -93,18 +131,21 @@ def resolve_xpp_metadata(
                 {"xpp_ref_kind": extra.get("xpp_extension_kind", "")},
                 normalized_roots,
                 stats,
+                base_index,
             )
             if not resolved_artifact:
                 continue
             base_name = resolved_artifact.split("::")[-1].split(".")[0]
             candidate = store._conn.execute(
-                "SELECT qualified_name FROM nodes WHERE kind='Function' AND parent_name=? AND name=?",
+                "SELECT qualified_name FROM nodes "
+                "WHERE kind='Function' AND parent_name=? AND name=?",
                 (base_name, row["name"]),
             ).fetchone()
             if not candidate:
                 continue
             exists = store._conn.execute(
-                "SELECT 1 FROM edges WHERE kind='WRAPS' AND source_qualified=? AND target_qualified=?",
+                "SELECT 1 FROM edges "
+                "WHERE kind='WRAPS' AND source_qualified=? AND target_qualified=?",
                 (row["qualified_name"], candidate["qualified_name"]),
             ).fetchone()
             if exists:
@@ -132,6 +173,7 @@ def _resolve_target(
     extra: dict,
     base_roots: list[str],
     stats: dict,
+    base_index: Optional[dict[str, list[tuple[str, Path]]]] = None,
 ) -> Optional[str]:
     if not target:
         return None
@@ -146,7 +188,9 @@ def _resolve_target(
         return candidate
 
     if base_roots:
-        loaded = _load_external_artifact(store, parser, artifact_name, ref_kind, base_roots)
+        loaded = _load_external_artifact(
+            store, parser, artifact_name, ref_kind, base_roots, base_index,
+        )
         if loaded:
             stats["external_artifacts_loaded"] += loaded
             candidate = _find_local_artifact(store, artifact_name, member_name)
@@ -169,7 +213,8 @@ def _find_local_artifact(
 ) -> Optional[str]:
     if member_name:
         row = store._conn.execute(
-            "SELECT qualified_name FROM nodes WHERE kind='Function' AND parent_name=? AND name=?",
+            "SELECT qualified_name FROM nodes "
+            "WHERE kind IN ('Function', 'Field') AND parent_name=? AND name=?",
             (artifact_name, member_name),
         ).fetchone()
         if row:
@@ -177,9 +222,37 @@ def _find_local_artifact(
 
     candidates = store.search_nodes(artifact_name, limit=10)
     for node in candidates:
-        if node.name == artifact_name and node.kind in ("Class", "Type"):
+        if node.name == artifact_name and node.kind in ("Class", "Type", "Field"):
             return node.qualified_name
     return None
+
+
+def _build_base_index(base_roots: list[str]) -> dict[str, list[tuple[str, Path]]]:
+    """Index all recognized Ax* XML files in base roots by stem (artifact name)."""
+    all_folders = set(XPP_METADATA_OBJECT_KINDS.keys())
+    index: dict[str, list[tuple[str, Path]]] = {}
+    for root in base_roots:
+        root_path = Path(root)
+        if not root_path.exists():
+            continue
+        logger.debug("Building X++ base index from %s", root)
+        for xml_path in root_path.rglob("*.xml"):
+            folder = xml_path.parent.name
+            if folder not in all_folders:
+                continue
+            stem = xml_path.stem
+            if stem not in index:
+                index[stem] = []
+            index[stem].append((folder, xml_path))
+    logger.debug("X++ base index built: %d distinct artifact names", len(index))
+    return index
+
+
+def _get_base_index(base_roots: list[str]) -> dict[str, list[tuple[str, Path]]]:
+    key = tuple(sorted(base_roots))
+    if key not in _BASE_INDEX_CACHE:
+        _BASE_INDEX_CACHE[key] = _build_base_index(base_roots)
+    return _BASE_INDEX_CACHE[key]
 
 
 def _load_external_artifact(
@@ -188,12 +261,37 @@ def _load_external_artifact(
     artifact_name: str,
     ref_kind: str,
     base_roots: list[str],
+    base_index: Optional[dict[str, list[tuple[str, Path]]]] = None,
 ) -> int:
     folders = _XPP_ARTIFACT_FOLDERS.get(ref_kind, [])
     if not folders:
         folders = [folder for group in _XPP_ARTIFACT_FOLDERS.values() for folder in group]
+    folder_set = set(folders)
     loaded = 0
     seen: set[str] = set()
+
+    if base_index is not None:
+        candidates = base_index.get(artifact_name, [])
+        for folder, xml_path in candidates:
+            if folder not in folder_set:
+                continue
+            path_str = str(xml_path)
+            if path_str in seen:
+                continue
+            try:
+                nodes, edges = parser.parse_file(xml_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to parse X++ metadata file %s: %s", xml_path, exc)
+                continue
+            if not nodes:
+                continue
+            fhash = parser.compute_content_hash(xml_path)
+            store.store_file_nodes_edges(path_str, nodes, edges, fhash)
+            seen.add(path_str)
+            loaded += 1
+        return loaded
+
+    # Fallback: per-artifact rglob (slow, used when no index)
     for root in base_roots:
         root_path = Path(root)
         if not root_path.exists():
@@ -201,7 +299,7 @@ def _load_external_artifact(
         for xml_path in root_path.rglob(f"{artifact_name}.xml"):
             if str(xml_path) in seen:
                 continue
-            if xml_path.parent.name not in folders:
+            if xml_path.parent.name not in folder_set:
                 continue
             try:
                 nodes, edges = parser.parse_file(xml_path)

@@ -46,11 +46,14 @@ logger = logging.getLogger(__name__)
 
 _XPP_METADATA_ROOT_MARKERS = {"Metadata", "PackagesLocalDirectory"}
 _XPP_METADATA_OBJECT_KINDS: dict[str, str] = {
+    # Core code artifacts
     "AxClass": "Class",
     "AxTable": "Class",
     "AxTableExtension": "Class",
+    "AxTableCollection": "Class",
     "AxForm": "Class",
     "AxFormExtension": "Class",
+    "AxFormPart": "Class",
     "AxMap": "Class",
     "AxMapExtension": "Class",
     "AxQuery": "Class",
@@ -59,12 +62,71 @@ _XPP_METADATA_OBJECT_KINDS: dict[str, str] = {
     "AxViewExtension": "Class",
     "AxDataEntityView": "Class",
     "AxDataEntityViewExtension": "Class",
+    "AxCompositeDataEntityView": "Class",
+    "AxAggregateDataEntity": "Class",
+    # Type artifacts
     "AxEnum": "Type",
     "AxEnumExtension": "Type",
     "AxEdt": "Type",
     "AxEdtExtension": "Type",
+    "AxConfigurationKey": "Type",
+    "AxConfigurationKeyGroup": "Type",
+    "AxLicenseCode": "Type",
+    # Event subscriptions
     "AxEventSubscription": "Class",
+    # UI / navigation
+    "AxMenu": "Class",
+    "AxMenuExtension": "Class",
+    "AxMenuItemDisplay": "Class",
+    "AxMenuItemDisplayExtension": "Class",
+    "AxMenuItemAction": "Class",
+    "AxMenuItemActionExtension": "Class",
+    "AxMenuItemOutput": "Class",
+    "AxMenuItemOutputExtension": "Class",
+    "AxTile": "Class",
+    "AxPage": "Class",
+    "AxInfoPart": "Class",
+    "AxPartCue": "Class",
+    "AxPartCueGroup": "Class",
+    "AxKPI": "Class",
+    # Reporting
+    "AxReport": "Class",
+    # Services
+    "AxService": "Class",
+    "AxServiceGroup": "Class",
+    # Security
+    "AxSecurityRole": "Type",
+    "AxSecurityRoleExtension": "Type",
+    "AxSecurityDuty": "Type",
+    "AxSecurityDutyExtension": "Type",
+    "AxSecurityPrivilege": "Type",
+    "AxSecurityPolicy": "Type",
+    "AxSecurityDirectAccessPermission": "Type",
+    # Workflow
+    "AxWorkflowTemplate": "Class",
+    "AxWorkflowTemplateExtension": "Class",
+    "AxWorkflowApproval": "Class",
+    "AxWorkflowApprovalExtension": "Class",
+    "AxWorkflowTask": "Class",
+    "AxWorkflowTaskExtension": "Class",
+    "AxWorkflowAutomatedTask": "Class",
+    "AxWorkflowCategory": "Class",
+    "AxWorkflowDueDateCalculationProvider": "Class",
+    "AxWorkflowHierarchyAssignmentProvider": "Class",
+    "AxWorkflowParticipantAssignmentProvider": "Class",
+    "AxWorkflowQueueAssignmentProvider": "Class",
+    # Analytics
+    "AxAggregateMeasurement": "Class",
+    "AxAggregateDimension": "Class",
+    "AxAggregateCalculatedMeasureTemplate": "Class",
+    "AxAggregateCalculatedMeasureTemplateOtherPeriod": "Class",
+    # Other
+    "AxResource": "Class",
+    "AxReference": "Class",
+    "AxRuleSet": "Class",
 }
+# Public alias so other modules can reference the recognized folder set.
+XPP_METADATA_OBJECT_KINDS = _XPP_METADATA_OBJECT_KINDS
 _XPP_KEYWORDS = {
     "if", "for", "while", "switch", "catch", "throw", "return", "new", "ttsbegin",
     "ttscommit", "ttsabort", "select", "insert_recordset", "update_recordset",
@@ -72,11 +134,24 @@ _XPP_KEYWORDS = {
     "case", "break", "continue", "next", "classstr", "tablestr", "formstr",
     "fieldstr", "methodstr", "enumstr", "identifierstr", "querystr",
     "mapstr", "extendedtypestr",
+    # X++ type keywords and common built-ins
+    "super", "this", "null", "true", "false", "void", "str", "int", "int64",
+    "real", "boolean", "date", "utcdatetime", "container", "anytype", "guid",
+    "retry", "pause", "in", "as", "is", "like", "between", "firstonly",
+    "crosscompany", "reverse", "order", "group", "by", "outer", "exists",
+    "notexists", "maxof", "minof", "sumof", "avgof", "countof",
+    # compile-time functions (lowercase check)
+    "dataentitystr", "menustr", "menuitemdisplaystr", "menuitemoutputstr",
+    "menuitemactionstr", "reportstr", "ssrsreportstr", "securityrolestr",
+    "securitydutystr", "securityprivilegestr", "workflowstr", "configurationkeystr",
+    "licensecodesstr", "tilestr", "pagestr", "resourcestr", "varstr",
 }
 _XPP_DECL_RE = re.compile(
     r"(?P<attrs>(?:\s*\[[^\]]+\]\s*)*)"
     r"(?P<mods>(?:(?:public|protected|private|internal|final|abstract)\s+)*)"
-    r"class\s+(?P<name>\w+)(?:\s+extends\s+(?P<base>\w+))?",
+    r"(?:class|interface)\s+(?P<name>\w+)"
+    r"(?:\s+extends\s+(?P<base>\w+))?"
+    r"(?:\s+implements\s+(?P<impls>[A-Za-z_][\w,\s]*?))?(?=\s*[{\n])",
     re.IGNORECASE | re.MULTILINE,
 )
 _XPP_METHOD_RE = re.compile(
@@ -91,7 +166,10 @@ _XPP_EXTENSION_OF_RE = re.compile(
     re.IGNORECASE,
 )
 _XPP_COMPILETIME_RE = re.compile(
-    r"\b(?P<kind>class|table|form|field|method|enum|identifier|query|map|extendedType)Str"
+    r"\b(?P<kind>class|table|form|field|method|enum|identifier|query|map|extendedType"
+    r"|dataEntity|menu|menuItemDisplay|menuItemOutput|menuItemAction|report|ssrsReport"
+    r"|securityRole|securityDuty|securityPrivilege|workflow|configurationKey"
+    r"|licenseCode|tile|page|resource|var)Str"
     r"\(\s*(?P<args>[^)]*?)\s*\)",
     re.IGNORECASE,
 )
@@ -101,6 +179,14 @@ _XPP_SELECT_RE = re.compile(
     r"\b(?:while\s+select|select|insert_recordset|update_recordset|delete_from)\s+"
     r"(?:[A-Za-z_]+\s+)*([A-Za-z_]\w*)",
     re.IGNORECASE,
+)
+_XPP_JOIN_RE = re.compile(
+    r"\b(?:exists\s+join|notexists\s+join|outer\s+join|join)\s+([A-Za-z_]\w*)",
+    re.IGNORECASE,
+)
+_XPP_IMPLEMENTS_RE = re.compile(
+    r"\bimplements\s+(?P<impls>[A-Za-z_][\w\s,]*?)(?=\s*[{(\n])",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # ---------------------------------------------------------------------------
@@ -1158,7 +1244,12 @@ class CodeParser:
                 line=method_node.line_start,
             ))
 
-        self._extract_xpp_metadata_references(root, artifact_qn, file_path_str, edges)
+        self._extract_xpp_metadata_references(root, artifact_qn, file_path_str, edges, object_type)
+        child_nodes, child_edges = self._extract_xpp_artifact_children(
+            root, text, artifact_name, artifact_qn, object_type, file_path_str, artifact_extra,
+        )
+        nodes.extend(child_nodes)
+        edges.extend(child_edges)
         return nodes, edges
 
     @staticmethod
@@ -1211,6 +1302,19 @@ class CodeParser:
                 line=self._find_text_line(xml_text, declaration),
                 extra={"xpp_ref_kind": ext.group("kind").lower()},
             ))
+        impls_match = _XPP_IMPLEMENTS_RE.search(declaration)
+        if impls_match:
+            decl_line = self._find_text_line(xml_text, declaration)
+            for iface in impls_match.group("impls").split(","):
+                iface = iface.strip()
+                if iface:
+                    edges.append(EdgeInfo(
+                        kind="IMPLEMENTS",
+                        source=artifact_qn,
+                        target=iface,
+                        file_path=file_path,
+                        line=decl_line,
+                    ))
         self._extract_xpp_compile_time_references(
             declaration,
             artifact_qn,
@@ -1276,6 +1380,18 @@ class CodeParser:
                 line=line_start + method_source[: access.start()].count("\n"),
                 extra={"xpp_ref_kind": "table"},
             ))
+        for join_match in _XPP_JOIN_RE.finditer(method_source):
+            target = join_match.group(1)
+            if target.lower() in _XPP_KEYWORDS:
+                continue
+            edges.append(EdgeInfo(
+                kind="ACCESSES",
+                source=method_qn,
+                target=target,
+                file_path=file_path,
+                line=line_start + method_source[: join_match.start()].count("\n"),
+                extra={"xpp_ref_kind": "join"},
+            ))
         return NodeInfo(
             kind="Function",
             name=method_name,
@@ -1322,6 +1438,7 @@ class CodeParser:
         artifact_qn: str,
         file_path: str,
         edges: list[EdgeInfo],
+        object_type: str = "",
     ) -> None:
         for tag_name, kind in (
             ("ExtendedDataType", "edt"),
@@ -1350,18 +1467,187 @@ class CodeParser:
                     file_path=file_path,
                     extra={"xpp_ref_kind": "field"},
                 ))
+
+        if object_type in ("AxTable", "AxTableExtension", "AxMap", "AxMapExtension"):
+            for rel_el in root.findall(".//Relations/AxTableRelation"):
+                related = (rel_el.findtext("./RelatedTable") or "").strip()
+                if related:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=artifact_qn,
+                        target=related,
+                        file_path=file_path,
+                        extra={"xpp_ref_kind": "table_relation"},
+                    ))
+            extends = (root.findtext("./Extends") or "").strip()
+            if extends:
+                edges.append(EdgeInfo(
+                    kind="INHERITS",
+                    source=artifact_qn,
+                    target=extends,
+                    file_path=file_path,
+                    line=1,
+                ))
+            for mapping_el in root.findall(".//Mappings/AxMapMapping"):
+                mapping_table = (mapping_el.findtext("./MappingTable") or "").strip()
+                if mapping_table:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=artifact_qn,
+                        target=mapping_table,
+                        file_path=file_path,
+                        extra={"xpp_ref_kind": "map_table"},
+                    ))
+
+        elif object_type in ("AxForm", "AxFormExtension"):
+            for ds_el in root.findall(".//DataSources/AxFormDataSource"):
+                table = (ds_el.findtext("./Table") or "").strip()
+                if table:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=artifact_qn,
+                        target=table,
+                        file_path=file_path,
+                        extra={"xpp_ref_kind": "datasource_table"},
+                    ))
+
+        elif object_type in ("AxQuery", "AxQuerySimpleExtension"):
+            for ds_table_el in root.findall(".//AxQuerySimpleDataSource/Table"):
+                value = (ds_table_el.text or "").strip()
+                if value:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=artifact_qn,
+                        target=value,
+                        file_path=file_path,
+                        extra={"xpp_ref_kind": "query_table"},
+                    ))
+
+        elif object_type in (
+            "AxView", "AxViewExtension",
+            "AxDataEntityView", "AxDataEntityViewExtension",
+        ):
+            for ds_table_el in root.findall(".//AxQuerySimpleDataSource/Table"):
+                value = (ds_table_el.text or "").strip()
+                if value:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=artifact_qn,
+                        target=value,
+                        file_path=file_path,
+                        extra={"xpp_ref_kind": "view_table"},
+                    ))
+            for ds_table_el in root.findall(".//AxDataEntityViewDataSource/Table"):
+                value = (ds_table_el.text or "").strip()
+                if value:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=artifact_qn,
+                        target=value,
+                        file_path=file_path,
+                        extra={"xpp_ref_kind": "view_table"},
+                    ))
+
         if root.tag.endswith("AxEventSubscription"):
-            for event_handler in root.iter():
-                local_name = event_handler.tag.rsplit("}", 1)[-1]
-                if local_name.lower().endswith("handler") or local_name.lower().endswith("method"):
-                    value = (event_handler.text or "").strip()
-                    if value:
-                        edges.append(EdgeInfo(
-                            kind="HANDLES",
+            publisher = (root.findtext("./Publisher") or "").strip()
+            publisher_method = (root.findtext("./PublisherMethod") or "").strip()
+            handler_class = (root.findtext("./EventHandler") or "").strip()
+            if publisher and publisher_method:
+                edges.append(EdgeInfo(
+                    kind="HANDLES",
+                    source=artifact_qn,
+                    target=f"{publisher}.{publisher_method}",
+                    file_path=file_path,
+                    extra={"xpp_ref_kind": "event"},
+                ))
+            elif publisher:
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=artifact_qn,
+                    target=publisher,
+                    file_path=file_path,
+                    extra={"xpp_ref_kind": "class"},
+                ))
+            if handler_class:
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=artifact_qn,
+                    target=handler_class,
+                    file_path=file_path,
+                    extra={"xpp_ref_kind": "class"},
+                ))
+
+    def _extract_xpp_artifact_children(
+        self,
+        root: ET.Element,
+        xml_text: str,
+        artifact_name: str,
+        artifact_qn: str,
+        object_type: str,
+        file_path: str,
+        artifact_extra: dict,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Extract child nodes (Field, datasource methods) for specific artifact types."""
+        child_nodes: list[NodeInfo] = []
+        child_edges: list[EdgeInfo] = []
+
+        if object_type in ("AxTable", "AxTableExtension", "AxMap", "AxMapExtension"):
+            for field_el in (
+                root.findall(".//Fields/AxTableField")
+                + root.findall(".//Fields/AxMapField")
+            ):
+                field_name = (field_el.findtext("./Name") or "").strip()
+                if not field_name:
+                    continue
+                field_type = (
+                    field_el.findtext("./ExtendedDataType")
+                    or field_el.findtext("./EnumType")
+                    or ""
+                ).strip()
+                child_nodes.append(NodeInfo(
+                    kind="Field",
+                    name=field_name,
+                    file_path=file_path,
+                    line_start=1,
+                    line_end=1,
+                    language="xpp-metadata",
+                    parent_name=artifact_name,
+                    return_type=field_type or None,
+                    extra={**artifact_extra, "xpp_field_type": field_type},
+                ))
+                child_edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=artifact_qn,
+                    target=self._qualify(field_name, file_path, artifact_name),
+                    file_path=file_path,
+                    line=1,
+                ))
+
+        elif object_type in ("AxForm", "AxFormExtension"):
+            for ds_el in root.findall(".//DataSources/AxFormDataSource"):
+                ds_name = (ds_el.findtext("./Name") or "").strip()
+                for method_el in ds_el.findall(".//Methods/Method"):
+                    method_name = (method_el.findtext("./Name") or "").strip()
+                    method_source = method_el.findtext("./Source") or ""
+                    if not method_name or not method_source.strip():
+                        continue
+                    ds_extra = {**artifact_extra, "xpp_datasource": ds_name}
+                    method_node = self._extract_xpp_method(
+                        method_name, method_source, xml_text, file_path,
+                        artifact_name, child_edges, ds_extra,
+                    )
+                    if method_node:
+                        method_node.extra["xpp_datasource"] = ds_name
+                        child_nodes.append(method_node)
+                        child_edges.append(EdgeInfo(
+                            kind="CONTAINS",
                             source=artifact_qn,
-                            target=value,
+                            target=self._qualify(method_name, file_path, artifact_name),
                             file_path=file_path,
+                            line=method_node.line_start,
                         ))
+
+        return child_nodes, child_edges
 
     @staticmethod
     def _find_text_line(xml_text: str, snippet: str) -> int:

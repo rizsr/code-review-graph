@@ -237,3 +237,295 @@ public static InventLocation find()
             )
         finally:
             store.close()
+
+
+class TestXppArtifactDepth:
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_axtable_fields_and_relations(self, tmp_path):
+        xml_path = tmp_path / "Metadata" / "RnD" / "RnD" / "AxTable" / "SalesOrder.xml"
+        _write_xpp_class(
+            xml_path,
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxTable>
+  <Name>SalesOrder</Name>
+  <Extends>SalesOrderBase</Extends>
+  <Fields>
+    <AxTableField>
+      <Name>CustAccount</Name>
+      <ExtendedDataType>CustAccount</ExtendedDataType>
+    </AxTableField>
+    <AxTableField>
+      <Name>Status</Name>
+      <EnumType>SalesStatus</EnumType>
+    </AxTableField>
+  </Fields>
+  <Relations>
+    <AxTableRelation>
+      <RelatedTable>CustTable</RelatedTable>
+    </AxTableRelation>
+  </Relations>
+</AxTable>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(n.kind == "Field" and n.name == "CustAccount" for n in nodes)
+        assert any(n.kind == "Field" and n.name == "Status" for n in nodes)
+        assert any(e.kind == "CONTAINS" and "CustAccount" in e.target for e in edges)
+        assert any(
+            e.kind == "REFERENCES" and e.target == "CustTable"
+            and e.extra.get("xpp_ref_kind") == "table_relation"
+            for e in edges
+        )
+        assert any(e.kind == "INHERITS" and e.target == "SalesOrderBase" for e in edges)
+
+    def test_axform_datasource_extraction(self, tmp_path):
+        xml_path = tmp_path / "Metadata" / "RnD" / "RnD" / "AxForm" / "SalesTable.xml"
+        _write_xpp_class(
+            xml_path,
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxForm>
+  <Name>SalesTable</Name>
+  <DataSources>
+    <AxFormDataSource>
+      <Name>SalesTable</Name>
+      <Table>SalesTable</Table>
+      <Methods>
+        <Method>
+          <Name>init</Name>
+          <Source><![CDATA[
+public void init()
+{
+    super();
+    SalesTable::find();
+}
+]]></Source>
+        </Method>
+      </Methods>
+    </AxFormDataSource>
+  </DataSources>
+</AxForm>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(
+            e.kind == "REFERENCES" and e.target == "SalesTable"
+            and e.extra.get("xpp_ref_kind") == "datasource_table"
+            for e in edges
+        )
+        assert any(n.kind == "Function" and n.name == "init" for n in nodes)
+        assert any(
+            e.kind == "CALLS" and e.target == "SalesTable.find" for e in edges
+        )
+
+    def test_axquery_datasource_tables(self, tmp_path):
+        xml_path = tmp_path / "Metadata" / "RnD" / "RnD" / "AxQuery" / "SalesQuery.xml"
+        _write_xpp_class(
+            xml_path,
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxQuery>
+  <Name>SalesQuery</Name>
+  <DataSources>
+    <AxQuerySimpleDataSource>
+      <Table>SalesTable</Table>
+      <DataSources>
+        <AxQuerySimpleDataSource>
+          <Table>CustTable</Table>
+        </AxQuerySimpleDataSource>
+      </DataSources>
+    </AxQuerySimpleDataSource>
+  </DataSources>
+</AxQuery>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(
+            e.kind == "REFERENCES" and e.target == "SalesTable"
+            and e.extra.get("xpp_ref_kind") == "query_table"
+            for e in edges
+        )
+        assert any(
+            e.kind == "REFERENCES" and e.target == "CustTable"
+            and e.extra.get("xpp_ref_kind") == "query_table"
+            for e in edges
+        )
+
+    def test_axview_datasource_tables(self, tmp_path):
+        xml_path = tmp_path / "Metadata" / "RnD" / "RnD" / "AxView" / "SalesLineView.xml"
+        _write_xpp_class(
+            xml_path,
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxView>
+  <Name>SalesLineView</Name>
+  <Query>
+    <DataSources>
+      <AxQuerySimpleDataSource>
+        <Table>SalesLine</Table>
+      </AxQuerySimpleDataSource>
+    </DataSources>
+  </Query>
+</AxView>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(
+            e.kind == "REFERENCES" and e.target == "SalesLine"
+            and e.extra.get("xpp_ref_kind") == "view_table"
+            for e in edges
+        )
+
+    def test_axeventsubscription_publisher_handler(self, tmp_path):
+        xml_path = (
+            tmp_path / "Metadata" / "RnD" / "RnD" / "AxEventSubscription"
+            / "SalesOrder_OnInsert_Handler.xml"
+        )
+        _write_xpp_class(
+            xml_path,
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxEventSubscription>
+  <Name>SalesOrder_OnInsert_Handler</Name>
+  <Publisher>SalesOrder</Publisher>
+  <PublisherMethod>onInsert</PublisherMethod>
+  <EventHandler>SalesOrderHandler</EventHandler>
+  <EventHandlerMethod>onSalesOrderInsert</EventHandlerMethod>
+  <EventType>PostEventHandler</EventType>
+</AxEventSubscription>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(
+            e.kind == "HANDLES" and e.target == "SalesOrder.onInsert" for e in edges
+        )
+        assert any(
+            e.kind == "REFERENCES" and e.target == "SalesOrderHandler"
+            and e.extra.get("xpp_ref_kind") == "class"
+            for e in edges
+        )
+
+    def test_axmap_fields_and_mappings(self, tmp_path):
+        xml_path = tmp_path / "Metadata" / "RnD" / "RnD" / "AxMap" / "AddressMap.xml"
+        _write_xpp_class(
+            xml_path,
+            """<?xml version="1.0" encoding="utf-8"?>
+<AxMap>
+  <Name>AddressMap</Name>
+  <Fields>
+    <AxMapField>
+      <Name>Street</Name>
+      <ExtendedDataType>AddressStreet</ExtendedDataType>
+    </AxMapField>
+  </Fields>
+  <Mappings>
+    <AxMapMapping>
+      <MappingTable>CustTable</MappingTable>
+    </AxMapMapping>
+    <AxMapMapping>
+      <MappingTable>VendTable</MappingTable>
+    </AxMapMapping>
+  </Mappings>
+</AxMap>
+""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(n.kind == "Field" and n.name == "Street" for n in nodes)
+        assert any(
+            e.kind == "REFERENCES" and e.target == "CustTable"
+            and e.extra.get("xpp_ref_kind") == "map_table"
+            for e in edges
+        )
+        assert any(
+            e.kind == "REFERENCES" and e.target == "VendTable"
+            and e.extra.get("xpp_ref_kind") == "map_table"
+            for e in edges
+        )
+
+
+class TestXppSyntaxParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _make_class_xml(self, tmp_path, folder, name, declaration, methods=""):
+        xml_path = tmp_path / "Metadata" / "RnD" / "RnD" / folder / f"{name}.xml"
+        methods_xml = ""
+        if methods:
+            methods_xml = f"<Methods>{methods}</Methods>"
+        body = f"""<?xml version="1.0" encoding="utf-8"?>
+<{folder}>
+  <Name>{name}</Name>
+  <SourceCode>
+    <Declaration><![CDATA[
+{declaration}
+]]></Declaration>
+    {methods_xml}
+  </SourceCode>
+</{folder}>
+"""
+        _write_xpp_class(xml_path, body)
+        return xml_path
+
+    def test_implements_edges(self, tmp_path):
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "MyRunnable",
+            "public class MyRunnable implements Runnable, IDisposable\n{",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        assert any(e.kind == "IMPLEMENTS" and e.target == "Runnable" for e in edges)
+        assert any(e.kind == "IMPLEMENTS" and e.target == "IDisposable" for e in edges)
+
+    def test_join_table_access(self, tmp_path):
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "MyQuery",
+            "public class MyQuery\n{",
+            methods="""
+      <Method>
+        <Name>run</Name>
+        <Source><![CDATA[
+public void run()
+{
+    while select SalesTable
+        join CustTable
+        exists join SalesLine
+        notexists join SalesParam
+    {
+    }
+}
+]]></Source>
+      </Method>""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        join_targets = {
+            e.target for e in edges
+            if e.kind == "ACCESSES" and e.extra.get("xpp_ref_kind") == "join"
+        }
+        assert "CustTable" in join_targets
+        assert "SalesLine" in join_targets
+        assert "SalesParam" in join_targets
+
+    def test_extra_compiletime_functions(self, tmp_path):
+        xml_path = self._make_class_xml(
+            tmp_path, "AxClass", "MyRefClass",
+            "public class MyRefClass\n{",
+            methods="""
+      <Method>
+        <Name>refs</Name>
+        <Source><![CDATA[
+public void refs()
+{
+    str r = reportStr(SalesInvoice);
+    str e = dataEntityStr(SalesOrderEntity);
+    str m = menuStr(MainMenu);
+    str p = securityRoleStr(SystemAdministrator);
+}
+]]></Source>
+      </Method>""",
+        )
+        nodes, edges = self.parser.parse_file(xml_path)
+        ref_targets = {
+            (e.extra.get("xpp_ref_kind"), e.target)
+            for e in edges if e.kind == "REFERENCES"
+        }
+        assert ("report", "SalesInvoice") in ref_targets
+        assert ("dataentity", "SalesOrderEntity") in ref_targets
+        assert ("menu", "MainMenu") in ref_targets
+        assert ("securityrole", "SystemAdministrator") in ref_targets
