@@ -123,6 +123,7 @@ internal final class InventLocationWarehousePlanning_Extension
 internal void enableParallelizationForWaveMethods()
 {
     next enableParallelizationForWaveMethods();
+    select firstOnly InventLocation;
     InventLocation::find();
 }
 ]]></Source>
