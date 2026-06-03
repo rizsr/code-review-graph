@@ -137,11 +137,11 @@ def resolve_xpp_metadata(
         base_index = _get_base_index(normalized_roots)
 
     _phase("Resolving X++ references…")
-    # Only resolve edges that originate from LOCAL repo files — not from
-    # externally-loaded base artifacts. External artifacts only need to exist
-    # as targets; recursively resolving their own references causes exponential
-    # blowup (each loaded artifact adds more edges → more artifacts → …).
-    base_root_prefixes = tuple(r + os.sep for r in normalized_roots) + tuple(normalized_roots)
+    # Track which edge IDs have already been attempted so each edge is only
+    # processed once across all passes. Without this, every pass re-processes
+    # all previous edges plus new ones, causing exponential blowup as loaded
+    # base artifacts add thousands of new edges each iteration.
+    seen_edge_ids: set[int] = set()
 
     iteration = 0
     changed = True
@@ -149,15 +149,14 @@ def resolve_xpp_metadata(
         changed = False
         iteration += 1
         cur = store._conn.cursor()
-        rows = cur.execute(
+        all_rows = cur.execute(
             "SELECT id, kind, source_qualified, target_qualified, file_path, line, extra "
             "FROM edges WHERE kind IN "
             "('EXTENDS', 'REFERENCES', 'ACCESSES', 'HANDLES', 'INHERITS', 'IMPLEMENTS')"
         ).fetchall()
-        # Filter to local-only edges in Python (avoids complex parameterised LIKE)
-        if base_root_prefixes:
-            rows = [r for r in rows if not r["file_path"].startswith(base_root_prefixes)]
-        desc = f"Resolving (pass {iteration})"
+        rows = [r for r in all_rows if r["id"] not in seen_edge_ids]
+        seen_edge_ids.update(r["id"] for r in rows)
+        desc = f"Resolving (pass {iteration}, {len(rows)} new edges)"
         for row in _progress(rows, total=len(rows), desc=desc, unit="edge"):
             edge_id = row["id"]
             target = row["target_qualified"]
@@ -180,8 +179,6 @@ def resolve_xpp_metadata(
             "SELECT qualified_name, name, parent_name, file_path, params, extra FROM nodes "
             "WHERE kind='Function' AND language='xpp' AND extra LIKE '%xpp_calls_next%'"
         ).fetchall()
-        if base_root_prefixes:
-            wrap_rows = [r for r in wrap_rows if not r["file_path"].startswith(base_root_prefixes)]
         for row in _progress(wrap_rows, total=len(wrap_rows), desc=f"Resolving WRAPS (pass {iteration})", unit="fn"):
             try:
                 extra = json.loads(row["extra"] or "{}")
