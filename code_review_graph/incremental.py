@@ -888,15 +888,18 @@ def full_build(
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
 
+    _WRITE_BATCH = 50  # files per SQLite transaction
+
     if use_serial or file_count < 8:
         # Serial fallback (for debugging or tiny repos)
+        write_buf: list[tuple] = []
         for i, rel_path in _progress(enumerate(files, 1), total=file_count, desc="Parsing"):
             full_path = Path(abs_files[i - 1])
             try:
                 source = full_path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
                 nodes, edges = parser.parse_bytes(full_path, source)
-                store.store_file_nodes_edges(str(full_path), nodes, edges, fhash)
+                write_buf.append((str(full_path), nodes, edges, fhash))
                 total_nodes += len(nodes)
                 total_edges += len(edges)
             except (OSError, PermissionError) as e:
@@ -904,12 +907,18 @@ def full_build(
             except Exception as e:
                 logger.warning("Error parsing %s: %s", full_path, e)
                 errors.append({"file": str(full_path), "error": str(e)})
+            if len(write_buf) >= _WRITE_BATCH:
+                store.store_file_batch(write_buf)
+                write_buf = []
+        if write_buf:
+            store.store_file_batch(write_buf)
     else:
         # Parallel parsing — store calls remain serial (SQLite single-writer).
         # Executor kind auto-selected: process on Linux/macOS/Windows-TTY,
         # thread on Windows-MCP-stdio to avoid pipe-handle inheritance
         # deadlock (issues #46, #136). Override via CRG_PARSE_EXECUTOR env.
         args_list = abs_files
+        write_buf = []
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             mapped = executor.map(_parse_single_file, args_list, chunksize=20)
             for i, (abs_path_str, nodes, edges, error, fhash) in _progress(
@@ -919,9 +928,14 @@ def full_build(
                     logger.warning("Error parsing %s: %s", abs_path_str, error)
                     errors.append({"file": abs_path_str, "error": error})
                     continue
-                store.store_file_nodes_edges(abs_path_str, nodes, edges, fhash)
+                write_buf.append((abs_path_str, nodes, edges, fhash))
                 total_nodes += len(nodes)
                 total_edges += len(edges)
+                if len(write_buf) >= _WRITE_BATCH:
+                    store.store_file_batch(write_buf)
+                    write_buf = []
+        if write_buf:
+            store.store_file_batch(write_buf)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")

@@ -6,9 +6,11 @@ from configured external metadata roots such as PackagesLocalDirectory.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import pickle
 import sys
 from pathlib import Path
 from typing import Optional
@@ -137,11 +139,14 @@ def resolve_xpp_metadata(
         base_index = _get_base_index(normalized_roots)
 
     _phase("Resolving X++ references…")
-    # Track which edge IDs have already been attempted so each edge is only
-    # processed once across all passes. Without this, every pass re-processes
-    # all previous edges plus new ones, causing exponential blowup as loaded
-    # base artifacts add thousands of new edges each iteration.
-    seen_edge_ids: set[int] = set()
+    # Opt 2: track which artifact names have been loaded so each external XML
+    # is parsed exactly once regardless of how many edges reference it.
+    loaded_artifacts: set[str] = set()
+
+    # Opt 3: use max_seen_id instead of a full seen-ID set so the SQL query
+    # uses the primary-key B-tree to skip already-processed edges — O(log N)
+    # instead of O(N) Python filtering of a full fetchall.
+    max_seen_id: int = 0
 
     iteration = 0
     changed = True
@@ -149,14 +154,31 @@ def resolve_xpp_metadata(
         changed = False
         iteration += 1
         cur = store._conn.cursor()
-        all_rows = cur.execute(
+
+        # Opt 3: only fetch edges with id > max previously seen id.
+        rows = cur.execute(
             "SELECT id, kind, source_qualified, target_qualified, file_path, line, extra "
             "FROM edges WHERE kind IN "
-            "('EXTENDS', 'REFERENCES', 'ACCESSES', 'HANDLES', 'INHERITS', 'IMPLEMENTS')"
+            "('EXTENDS', 'REFERENCES', 'ACCESSES', 'HANDLES', 'INHERITS', 'IMPLEMENTS') "
+            "AND id > ?",
+            (max_seen_id,)
         ).fetchall()
-        rows = [r for r in all_rows if r["id"] not in seen_edge_ids]
-        seen_edge_ids.update(r["id"] for r in rows)
+        if rows:
+            max_seen_id = max(r["id"] for r in rows)
+
+        # Opt 4: build in-memory node existence structures once per pass.
+        known_nodes: set[str] = {
+            r[0] for r in cur.execute("SELECT qualified_name FROM nodes").fetchall()
+        }
+        artifact_to_qn: dict[str, str] = {}
+        for qn in known_nodes:
+            parts = qn.split("::")
+            if len(parts) == 2:
+                artifact_to_qn.setdefault(parts[1].split(".")[0], qn)
+
         desc = f"Resolving (pass {iteration}, {len(rows)} new edges)"
+        # Opt 5: collect edge updates; flush with executemany() after the loop.
+        pending_updates: list[tuple[str, str, int]] = []
         for row in _progress(rows, total=len(rows), desc=desc, unit="edge"):
             edge_id = row["id"]
             target = row["target_qualified"]
@@ -166,19 +188,26 @@ def resolve_xpp_metadata(
                 extra = {}
             resolved = _resolve_target(
                 store, parser, target, extra, normalized_roots, stats, base_index,
+                loaded_artifacts, known_nodes, artifact_to_qn,
             )
             if resolved and resolved != target:
-                cur.execute(
-                    "UPDATE edges SET target_qualified=?, extra=? WHERE id=?",
-                    (resolved, json.dumps({**extra, "xpp_resolved": True}), edge_id),
+                pending_updates.append(
+                    (resolved, json.dumps({**extra, "xpp_resolved": True}), edge_id)
                 )
                 stats["edges_rewritten"] += 1
                 changed = True
+        if pending_updates:
+            cur.executemany(
+                "UPDATE edges SET target_qualified=?, extra=? WHERE id=?",
+                pending_updates,
+            )
 
-        wrap_rows = cur.execute(
-            "SELECT qualified_name, name, parent_name, file_path, params, extra FROM nodes "
-            "WHERE kind='Function' AND language='xpp' AND extra LIKE '%xpp_calls_next%'"
+        # Opt 7: replace LIKE scan with Python filter on a full xpp Function fetch.
+        all_xpp_fns = cur.execute(
+            "SELECT qualified_name, name, parent_name, file_path, params, extra "
+            "FROM nodes WHERE kind='Function' AND language='xpp'"
         ).fetchall()
+        wrap_rows = [r for r in all_xpp_fns if "xpp_calls_next" in (r["extra"] or "")]
         for row in _progress(wrap_rows, total=len(wrap_rows), desc=f"Resolving WRAPS (pass {iteration})", unit="fn"):
             try:
                 extra = json.loads(row["extra"] or "{}")
@@ -205,6 +234,9 @@ def resolve_xpp_metadata(
                 normalized_roots,
                 stats,
                 base_index,
+                loaded_artifacts,
+                known_nodes,
+                artifact_to_qn,
             )
             if not resolved_artifact:
                 continue
@@ -261,26 +293,35 @@ def _resolve_target(
     base_roots: list[str],
     stats: dict,
     base_index: Optional[dict[str, list[tuple[str, Path]]]] = None,
+    loaded_artifacts: Optional[set[str]] = None,
+    known_nodes: Optional[set[str]] = None,
+    artifact_to_qn: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     if not target:
         return None
-    direct = store.get_node(target)
-    if direct:
-        return direct.qualified_name
+    # Opt 4: check in-memory set before hitting DB.
+    if known_nodes is not None:
+        if target in known_nodes:
+            return target
+    else:
+        direct = store.get_node(target)
+        if direct:
+            return direct.qualified_name
 
     artifact_name, member_name = _split_target(target)
     ref_kind = str(extra.get("xpp_ref_kind", "")).lower()
-    candidate = _find_local_artifact(store, artifact_name, member_name)
+    candidate = _find_local_artifact(store, artifact_name, member_name, artifact_to_qn)
     if candidate:
         return candidate
 
     if base_roots:
         loaded = _load_external_artifact(
             store, parser, artifact_name, ref_kind, base_roots, base_index,
+            loaded_artifacts,
         )
         if loaded:
             stats["external_artifacts_loaded"] += loaded
-            candidate = _find_local_artifact(store, artifact_name, member_name)
+            candidate = _find_local_artifact(store, artifact_name, member_name, artifact_to_qn)
             if candidate:
                 return candidate
     return target if "::" in target else None
@@ -297,6 +338,7 @@ def _find_local_artifact(
     store: GraphStore,
     artifact_name: str,
     member_name: Optional[str],
+    artifact_to_qn: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     if member_name:
         row = store._conn.execute(
@@ -306,6 +348,20 @@ def _find_local_artifact(
         ).fetchone()
         if row:
             return row["qualified_name"]
+
+    # Opt 4: use pre-built in-memory dict instead of FTS5 search_nodes query.
+    if artifact_to_qn is not None:
+        cached = artifact_to_qn.get(artifact_name)
+        if cached:
+            return cached
+        # Dict may be stale for nodes loaded within the current pass — fall back
+        # to a direct indexed SQL query (not FTS) for just this artifact name.
+        row = store._conn.execute(
+            "SELECT qualified_name FROM nodes "
+            "WHERE name=? AND kind IN ('Class', 'Type', 'Field') LIMIT 1",
+            (artifact_name,),
+        ).fetchone()
+        return row["qualified_name"] if row else None
 
     candidates = store.search_nodes(artifact_name, limit=10)
     for node in candidates:
@@ -354,9 +410,40 @@ def _build_base_index(base_roots: list[str]) -> dict[str, list[tuple[str, Path]]
 
 def _get_base_index(base_roots: list[str]) -> dict[str, list[tuple[str, Path]]]:
     key = tuple(sorted(base_roots))
-    if key not in _BASE_INDEX_CACHE:
-        _BASE_INDEX_CACHE[key] = _build_base_index(base_roots)
-    return _BASE_INDEX_CACHE[key]
+    if key in _BASE_INDEX_CACHE:
+        return _BASE_INDEX_CACHE[key]
+
+    # Opt 6: persist to disk so the 277k-file walk only runs once across sessions.
+    roots_sig = hashlib.md5(str(key).encode()).hexdigest()[:12]
+    cache_dir = Path.home() / ".code-review-graph" / "cache"
+    cache_path = cache_dir / f"xpp_base_index_{roots_sig}.pkl"
+
+    if cache_path.exists() and not os.environ.get("CRG_XPP_REBUILD_INDEX"):
+        try:
+            roots_mtime = max(
+                Path(r).stat().st_mtime for r in base_roots if Path(r).exists()
+            )
+            if roots_mtime <= cache_path.stat().st_mtime:
+                with open(cache_path, "rb") as f:
+                    index = pickle.load(f)
+                _BASE_INDEX_CACHE[key] = index
+                _phase(
+                    f"Loaded base index from cache "
+                    f"({len(index)} artifact names — set CRG_XPP_REBUILD_INDEX=1 to force rebuild)"
+                )
+                return index
+        except Exception:
+            pass  # Fall through to rebuild
+
+    index = _build_base_index(base_roots)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as f:
+            pickle.dump(index, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as exc:
+        logger.debug("Could not persist base index cache: %s", exc)
+    _BASE_INDEX_CACHE[key] = index
+    return index
 
 
 def _load_external_artifact(
@@ -366,13 +453,19 @@ def _load_external_artifact(
     ref_kind: str,
     base_roots: list[str],
     base_index: Optional[dict[str, list[tuple[str, Path]]]] = None,
+    loaded_artifacts: Optional[set[str]] = None,
 ) -> int:
+    # Opt 2: skip if this artifact name was already loaded in a previous call.
+    if loaded_artifacts is not None and artifact_name in loaded_artifacts:
+        return 0
+
     folders = _XPP_ARTIFACT_FOLDERS.get(ref_kind, [])
     if not folders:
         folders = [folder for group in _XPP_ARTIFACT_FOLDERS.values() for folder in group]
     folder_set = set(folders)
-    loaded = 0
     seen: set[str] = set()
+    # Opt 1B: collect all parse results and write in one batch transaction.
+    parse_results: list[tuple[str, list, list, str]] = []
 
     if base_index is not None:
         candidates = base_index.get(artifact_name, [])
@@ -390,30 +483,35 @@ def _load_external_artifact(
             if not nodes:
                 continue
             fhash = parser.compute_content_hash(xml_path)
-            store.store_file_nodes_edges(path_str, nodes, edges, fhash)
+            parse_results.append((path_str, nodes, edges, fhash))
             seen.add(path_str)
-            loaded += 1
-        return loaded
+    else:
+        # Fallback: per-artifact rglob (slow, used when no index)
+        for root in base_roots:
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
+            for xml_path in root_path.rglob(f"{artifact_name}.xml"):
+                path_str = str(xml_path)
+                if path_str in seen:
+                    continue
+                if xml_path.parent.name not in folder_set:
+                    continue
+                try:
+                    nodes, edges = parser.parse_file(xml_path)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Failed to parse X++ metadata file %s: %s", xml_path, exc)
+                    continue
+                if not nodes:
+                    continue
+                fhash = parser.compute_content_hash(xml_path)
+                parse_results.append((path_str, nodes, edges, fhash))
+                seen.add(path_str)
 
-    # Fallback: per-artifact rglob (slow, used when no index)
-    for root in base_roots:
-        root_path = Path(root)
-        if not root_path.exists():
-            continue
-        for xml_path in root_path.rglob(f"{artifact_name}.xml"):
-            if str(xml_path) in seen:
-                continue
-            if xml_path.parent.name not in folder_set:
-                continue
-            try:
-                nodes, edges = parser.parse_file(xml_path)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Failed to parse X++ metadata file %s: %s", xml_path, exc)
-                continue
-            if not nodes:
-                continue
-            fhash = parser.compute_content_hash(xml_path)
-            store.store_file_nodes_edges(str(xml_path), nodes, edges, fhash)
-            seen.add(str(xml_path))
-            loaded += 1
-    return loaded
+    if parse_results:
+        store.store_file_batch(parse_results)
+
+    if loaded_artifacts is not None:
+        loaded_artifacts.add(artifact_name)
+
+    return len(parse_results)
