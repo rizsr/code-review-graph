@@ -137,6 +137,12 @@ def resolve_xpp_metadata(
         base_index = _get_base_index(normalized_roots)
 
     _phase("Resolving X++ references…")
+    # Only resolve edges that originate from LOCAL repo files — not from
+    # externally-loaded base artifacts. External artifacts only need to exist
+    # as targets; recursively resolving their own references causes exponential
+    # blowup (each loaded artifact adds more edges → more artifacts → …).
+    base_root_prefixes = tuple(r + os.sep for r in normalized_roots) + tuple(normalized_roots)
+
     iteration = 0
     changed = True
     while changed:
@@ -148,6 +154,9 @@ def resolve_xpp_metadata(
             "FROM edges WHERE kind IN "
             "('EXTENDS', 'REFERENCES', 'ACCESSES', 'HANDLES', 'INHERITS', 'IMPLEMENTS')"
         ).fetchall()
+        # Filter to local-only edges in Python (avoids complex parameterised LIKE)
+        if base_root_prefixes:
+            rows = [r for r in rows if not r["file_path"].startswith(base_root_prefixes)]
         desc = f"Resolving (pass {iteration})"
         for row in _progress(rows, total=len(rows), desc=desc, unit="edge"):
             edge_id = row["id"]
@@ -171,6 +180,8 @@ def resolve_xpp_metadata(
             "SELECT qualified_name, name, parent_name, file_path, params, extra FROM nodes "
             "WHERE kind='Function' AND language='xpp' AND extra LIKE '%xpp_calls_next%'"
         ).fetchall()
+        if base_root_prefixes:
+            wrap_rows = [r for r in wrap_rows if not r["file_path"].startswith(base_root_prefixes)]
         for row in _progress(wrap_rows, total=len(wrap_rows), desc=f"Resolving WRAPS (pass {iteration})", unit="fn"):
             try:
                 extra = json.loads(row["extra"] or "{}")
