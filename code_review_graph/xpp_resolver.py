@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,28 @@ from .graph import GraphStore
 from .parser import XPP_METADATA_OBJECT_KINDS, CodeParser, EdgeInfo
 
 logger = logging.getLogger(__name__)
+
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:  # pragma: no cover
+    _HAS_TQDM = False
+
+
+def _progress(iterable, total: int, desc: str, unit: str = "it"):
+    if _HAS_TQDM:
+        return _tqdm(iterable, total=total, desc=desc, unit=unit, dynamic_ncols=True)
+    def _plain(it):
+        for i, item in enumerate(it, 1):
+            yield item
+            if i % 200 == 0 or i == total:
+                print(f"\r  {desc}: {i}/{total}", end="", flush=True, file=sys.stderr)
+        print(file=sys.stderr)
+    return _plain(iterable)
+
+
+def _phase(msg: str) -> None:
+    print(f"  {msg}", file=sys.stderr, flush=True)
 
 # Module-level cache so large base roots are only indexed once per process.
 _BASE_INDEX_CACHE: dict[tuple[str, ...], dict[str, list[tuple[str, Path]]]] = {}
@@ -110,18 +133,23 @@ def resolve_xpp_metadata(
 
     base_index: Optional[dict[str, list[tuple[str, Path]]]] = None
     if normalized_roots:
+        _phase("Building X++ base index…")
         base_index = _get_base_index(normalized_roots)
 
+    _phase("Resolving X++ references…")
+    iteration = 0
     changed = True
     while changed:
         changed = False
+        iteration += 1
         cur = store._conn.cursor()
         rows = cur.execute(
             "SELECT id, kind, source_qualified, target_qualified, file_path, line, extra "
             "FROM edges WHERE kind IN "
             "('EXTENDS', 'REFERENCES', 'ACCESSES', 'HANDLES', 'INHERITS', 'IMPLEMENTS')"
         ).fetchall()
-        for row in rows:
+        desc = f"Resolving (pass {iteration})"
+        for row in _progress(rows, total=len(rows), desc=desc, unit="edge"):
             edge_id = row["id"]
             target = row["target_qualified"]
             try:
@@ -143,7 +171,7 @@ def resolve_xpp_metadata(
             "SELECT qualified_name, name, parent_name, file_path, params, extra FROM nodes "
             "WHERE kind='Function' AND language='xpp' AND extra LIKE '%xpp_calls_next%'"
         ).fetchall()
-        for row in wrap_rows:
+        for row in _progress(wrap_rows, total=len(wrap_rows), desc=f"Resolving WRAPS (pass {iteration})", unit="fn"):
             try:
                 extra = json.loads(row["extra"] or "{}")
             except (json.JSONDecodeError, TypeError):
@@ -286,12 +314,19 @@ def _build_base_index(base_roots: list[str]) -> dict[str, list[tuple[str, Path]]
     """
     all_folders = set(XPP_METADATA_OBJECT_KINDS.keys())
     index: dict[str, list[tuple[str, Path]]] = {}
+    total_files = 0
     for root in base_roots:
         if not os.path.isdir(root):
             continue
-        logger.debug("Building X++ base index from %s", root)
+        _phase(f"Indexing base root: {root} …")
+        packages_done = 0
         for dirpath, dirnames, filenames in os.walk(root):
             folder = os.path.basename(dirpath)
+            # Count top-level packages for progress feedback
+            depth = dirpath[len(root):].count(os.sep)
+            if depth == 1:
+                packages_done += 1
+                print(f"\r  Indexing packages: {packages_done}", end="", flush=True, file=sys.stderr)
             if folder not in all_folders:
                 continue
             for fname in filenames:
@@ -303,7 +338,9 @@ def _build_base_index(base_roots: list[str]) -> dict[str, list[tuple[str, Path]]
                     index[stem] = [entry]
                 else:
                     index[stem].append(entry)
-    logger.debug("X++ base index built: %d distinct artifact names", len(index))
+                total_files += 1
+        print(file=sys.stderr)  # newline after package counter
+    _phase(f"Base index ready: {len(index)} artifact names across {total_files} files")
     return index
 
 

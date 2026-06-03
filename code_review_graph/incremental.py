@@ -931,6 +931,7 @@ def full_build(
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
+    _phase("Running X++ resolver…")
     xpp_stats = _run_xpp_resolver(store, xpp_base_roots or get_xpp_base_roots())
 
     return {
@@ -1068,6 +1069,8 @@ def incremental_update(
     spring_stats = _run_spring_resolver(store) if spring_changed else None
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     xpp_changed = any(rp.endswith(".xml") for rp in all_files)
+    if xpp_changed:
+        _phase("Running X++ resolver…")
     xpp_stats = (
         _run_xpp_resolver(store, xpp_base_roots or get_xpp_base_roots())
         if xpp_changed else None
